@@ -248,6 +248,72 @@ which supports idea 4.
 - **Pagination that says what it hides**: every listing ends with "showing 20 of 4,312; `--page 2` or `--filter ...`". Agents rarely page, so make it obvious.
 - **Optional LLM cluster titles** (Clio-style), run on the host before the agent starts or on demand. That gives a table of contents of the corpus, which is much easier to scan than raw example texts.
 - **Drain3** for template mining instead of a custom implementation.
+- **Model it on Aider's repo map.** The repo map compresses a codebase into a
+  ranked skeleton so the model knows its shape without reading it; `atlas` is
+  the same thing for a log corpus. Also borrow its use of graph ranking: score
+  entities and clusters by centrality (seen with many actors, or linking
+  otherwise separate clusters) as well as by rarity. Keep the ranking to
+  general signals only, since it steers the agent and could otherwise be
+  overfit to this dataset.
+- **Next-step footer.** Every response ends with two or three exact commands
+  to run next (`→ atlas expand c17 · atlas grep --page 2`). Agents rarely page
+  through truncated output, and a ready-made command is harder to ignore than
+  a hint written as prose. Running bare `atlas` lists all commands. Both are
+  cheap.
+- **Overview size: undecided.** It's open whether the first overview should
+  fit a fixed token budget (as the repo map does) or simply be well-ordered
+  and paginated. Start with a sensible default length and compare in the
+  pilots.
+- [Aider repo map](https://aider.chat/docs/repomap.html), suggested in review by
+  another agent.
+
+**Idea 1 (`atlas`): design rules from review.** Suggested by another agent,
+then discussed and adjusted.
+- **The first screen must be the right one.** Agents rarely page, so footers
+  only help at the margin. In `atlas clusters` and `atlas grep`, the first
+  screen is a short block of big clusters, one line each (the gist is cheap
+  and still matters), then small clusters ranked by **salience**, not just by
+  size. Salience combines rarity with general content signals: length, number
+  of extracted entities, code or commands present, and whether the author is
+  unusual for that field. Not "all singletons in full": on a large corpus
+  singletons can number thousands and include noise (typos, short one-off
+  events, rows the clustering failed to group). Of everything here, this
+  ordering choice matters most.
+- **Clustering quality is load-bearing; validate it offline before any paid
+  run.**
+  - Cluster each text field on its own, not in one global pool.
+  - Short rows (a few words) go to Drain-style template mining; MinHash is
+    unreliable on very short texts.
+  - Thresholds are tuned **only on generic criteria**: the shape of the
+    cluster-size distribution, whether random samples from big clusters look
+    alike, and whether small clusters exist at all. Never on whether a known
+    finding lands in a small cluster; that is the overfitting backdoor.
+  - Freeze the thresholds before looking at where specific findings land, and
+    sanity-check them on a second corpus (urlquery) before any paid run.
+- **Timestamp precision in `profile`.** Report the share of round values
+  (`00:00:00`, `12:00:00`), duplicate timestamps, and the finest resolution
+  seen, so that day-precision or placeholder times are flagged rather than
+  read as exact.
+- **Anomaly output is budgeted too**, or `anomalies` recreates the grep
+  problem one level up. Keep a small number of well-defined detectors, each
+  returning a short ranked list with one example and a count. Bursts are
+  defined per cluster and per actor only, at first. Plain rare-term (tf-idf)
+  detection mostly surfaces typos, so it needs filtering or should stay out.
+- **Look-alike identifiers need a confusables skeleton.** NFKC normalisation
+  does not fold Cyrillic `е` into Latin `e`. Compute the Unicode TR39
+  confusable skeleton for each value in identifier-like fields, group values
+  by skeleton, and flag groups with more than one distinct raw value (a
+  single pass, not pairwise comparison). Vendor `confusables.txt` rather than
+  depending on PyICU. Also flag mixed-script tokens.
+- **Field inference, not just field-agnosticism.** `profile` guesses the
+  timestamp field (parseable as time), actor fields (identifier-like,
+  moderate cardinality) and main text fields (mean length far above the
+  rest), **per file**, since the actor can be a username in one file and an
+  IP in another. It prints these guesses at the top. Every command accepts
+  `--time-field`, `--actor-field` and `--text-field` overrides. No setup
+  needed on this corpus, and on an unknown one any wrong guess is visible and
+  easy to fix. The urlquery corpus, with its very different structure, is the
+  test.
 
 **Idea 2 (reading crew): split into two tools, both host-side on `react`:**
 - **`sweep`** (unprompted): the fixed-schema read of every cluster, as before. Finds things nobody thought to ask about.
@@ -284,7 +350,26 @@ budget. The benchmark already has 10, 30 and 120 minute data points for that.
 
 ## Revised plan
 
-1. `atlas` (with `pivot`, pagination hints and Drain3). No model calls; test offline.
+1. `atlas`, deterministic core first, no model calls. Build order:
+   `profile` (with field inference and timestamp precision) →
+   `clusters`/`expand` → **offline clustering validation, thresholds frozen**
+   → `grep` (salience-ranked first screen) → `unseen` plus a coverage log →
+   **early smoke pilot** → `entities`/`pivot` →
+   `timeline --novel` → `anomalies` → LLM cluster titles.
+   - `unseen` comes early because it's small once clusters exist and is what
+     sets `atlas` apart. Its coverage log also gives a free process metric for
+     every run: how many of the small (long-tail) clusters the agent opened.
+     That can be compared before paying for grading.
+   - Exception to "anomalies last": the look-alike identifier check
+     (confusables skeleton plus mixed-script tokens) is cheap and rarely
+     misfires, so it ships with `entities`. Bursts and change points,
+     which need the most false-positive tuning, come last.
+   - Smoke pilot: a few dollars of `react` runs once the first four commands
+     exist, to check that agents actually use the tool. Whether agents use it
+     at all is the biggest risk, and it depends on the tool description, not
+     on the features.
+   - LLM cluster titles come last because the prompt wording is the first
+     place overfitting can creep in.
 2. `llm_grep` + `sweep` as host-side Inspect tools on `react`, with cost caps.
 3. Pilot comparison on German wiki, each against plain `react`: atlas alone; atlas + `llm_grep`/`sweep`; super-agent (idea 5a). One cheap model and one strong model, 10 and 30 minute budgets, about 3 replicates each.
 4. Test whatever wins on a held-out incident (urlquery, Mythos 5 or RubyHack).
