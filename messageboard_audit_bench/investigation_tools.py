@@ -29,6 +29,26 @@ ATLAS_CACHE="${{ATLAS_CACHE:-/tmp/atlas-cache}}" PYTHONPATH="{ATLAS_HOME}" exec 
 """
 
 
+# Appended to the task prompt when the tool is enabled. It says how to use the tool and
+# nothing about what to look for, so it is the same for every incident.
+TOOL_PROMPTS = {
+    "atlas": (
+        "\n\nYou also have `atlas`, a map of the log corpus (an `atlas` tool, also on PATH "
+        "in bash). Use it: start with `atlas overview` to see the corpus's structure, its "
+        "largest clusters of repeated records and its rarest, most unusual ones. Drill in "
+        "with `atlas expand`, `atlas grep` and `atlas show`, and run `atlas unseen` "
+        "periodically and before you finalise your report, to find salient records you have "
+        "not looked at yet. For questions about one value or one field (who, when, how "
+        "often), use `atlas entities`, `atlas pivot` and `atlas count` before writing a "
+        "script. Plain shell tools remain available for anything atlas does not cover.\n"
+    ),
+}
+
+
+def prompt_addendum(tools: tuple[str, ...]) -> str:
+    return "".join(TOOL_PROMPTS[t] for t in tools)
+
+
 def parse_tools(value: str | None) -> tuple[str, ...]:
     names = tuple(sorted({n.strip() for n in (value or "").split(",") if n.strip()}))
     unknown = [n for n in names if n not in SUPPORTED_TOOLS]
@@ -82,16 +102,24 @@ def atlas() -> Tool:
         """Map of the log corpus in /work/data: clusters of near-duplicate records, the rare
         and unusual records ranked first, and a record of what you have already looked at.
         Use it to orient yourself quickly and to find the rare records that plain grep buries
-        under repetition. It is also on PATH in bash as `atlas`.
+        under repetition. Start with `overview`. It is also on PATH in bash as `atlas`.
 
         Commands:
           overview                       start here: files, guessed fields, biggest and most salient clusters
           profile [TABLE]                fields: roles, counts, top/rare values, time range and precision
           clusters [--field T.F] [--sort salience|size|time] [--page N]
           expand ID                      open a cluster (cNN) or window (wNN): span, actors, varied examples
-          show REF [--offset N]          one row in full (REF = table:line, e.g. revisions:120)
+          show REF [--offset N]          one row in full; REF = file:line or the record's own id
           grep PATTERN [-i] [--field T.F] [--page N]   regex search, hits grouped by cluster, rare hits first
           unseen [--page N]              salient clusters you have not opened yet, plus coverage so far
+          entities [--kind K] [--sort rare|count|first]   values to pivot on (field values, hosts, IPs,
+                                         paths...), rarest first, with first/last seen and actors
+          pivot VALUE [--exact]          every row in any file containing VALUE, as one timeline
+          count TABLE[.FIELD] [--where F=V|F!=V|F~RE ...] [--by day|hour|FIELD]   filtered counts and
+                                         group-bys, instead of writing a script
+
+        Refs like logs:120 are 1-based line numbers in the source file, so they stay valid in
+        shell and python too; rows also show their own id field, which is best for citing.
 
         Args:
             command: An atlas command line without the leading "atlas", e.g. "overview",

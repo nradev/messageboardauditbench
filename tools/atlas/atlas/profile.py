@@ -140,7 +140,10 @@ def profile_table(name: str, rows: list[dict]) -> TableProfile:
         fs.distinct = len(counter)
         common = counter.most_common()
         fs.top = common[:5]
-        fs.rare = [x for x in common[::-1][:5] if x[1] == 1] if fs.distinct > 5 else []
+        # Rare values only mean something when most values repeat; on near-unique fields
+        # the "rarest" are just arbitrary rows.
+        repeats = fs.present and fs.distinct / fs.present < 0.9
+        fs.rare = [x for x in common[::-1][:5] if x[1] == 1] if fs.distinct > 5 and repeats else []
         fs.mean_len = lengths / n_str if n_str else 0.0
         fs.space_frac = spaced / n_str if n_str else 0.0
         fs.time_frac = len(times) / fs.present if fs.present else 0.0

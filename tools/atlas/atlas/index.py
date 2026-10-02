@@ -12,11 +12,13 @@ from pathlib import Path
 
 from . import __version__
 from .cluster import Cluster, cluster_field
+from .entities import build_entities
 from .load import Table, data_files, load_dir
 from .profile import TableProfile, parse_time, profile_table
-from .signals import salience, signal_set
+from .signals import salience, signal_set, signal_weights
 
 WINDOW = 20  # rows per window
+TOP_SALIENT = 50  # coverage is reported against this many most salient small clusters
 LOW_REDUNDANCY = 0.5  # a field whose values are mostly singletons gets windows too
 
 
@@ -32,6 +34,14 @@ class Index:
     row_cluster: dict[tuple[str, str, int], str] = field(default_factory=dict)  # (table, field, row) -> cid
     overrides: dict = field(default_factory=dict)
     boilerplate: dict[tuple[str, str], set[str]] = field(default_factory=dict)  # (table, field) -> lines
+    id_lookup: dict[str, tuple[str, int]] = field(default_factory=dict)  # record id value -> (table, row)
+    entities: dict = field(default_factory=dict)  # (kind, value) -> EntityStat
+    top_salient: list[str] = field(default_factory=list)  # ids of the most salient small clusters
+
+    def native_id(self, table: str, row: int) -> str | None:
+        f = self.profiles[table].id_field
+        v = self.tables[table].rows[row].get(f) if f else None
+        return str(v) if v not in (None, "") else None
 
     def display_text(self, c: Cluster, row: int) -> str:
         """Text for snippets: lines that recur across >1% of the field's values are dropped."""
@@ -53,9 +63,6 @@ class Index:
             return "\n".join(str(r[f]) for f in fields if r.get(f) not in (None, ""))
         v = r.get(c.field)
         return v if isinstance(v, str) else str(v)
-
-    def units(self) -> list[Cluster]:
-        return self.clusters + self.windows
 
     def actor_of(self, table: str, row: int) -> list[tuple[str, str]]:
         r = self.tables[table].rows[row]
@@ -126,9 +133,15 @@ def build_index(data_dir: Path, overrides: dict | None = None, use_cache: bool =
         idx.by_id[c.cid] = c
         for r in c.members:
             idx.row_cluster[(c.table, c.field, r)] = c.cid
-        text = idx.text_of(c, c.leader)
-        c.signals = signal_set(text)
-        c.score = salience(c.size, text, c.signals)
+        c.signals = signal_set(idx.text_of(c, c.leader))
+    # Salience weights each signal by its rarity among the clusters of the same field.
+    by_field: dict[tuple[str, str], list[Cluster]] = {}
+    for c in clusters:
+        by_field.setdefault((c.table, c.field), []).append(c)
+    for group in by_field.values():
+        weights = signal_weights([c.signals for c in group])
+        for c in group:
+            c.score = salience(c.size, idx.text_of(c, c.leader), sum(weights[s] for s in c.signals))
     # Boilerplate lines per field (shown in full by expand/show, dropped from snippets).
     for name, t in tables.items():
         for f in profiles[name].text_fields:
@@ -152,11 +165,22 @@ def build_index(data_dir: Path, overrides: dict | None = None, use_cache: bool =
         for start in range(0, len(order), WINDOW):
             w = Cluster(name, "(window)", order[start : start + WINDOW], kind="window")
             w.cid = f"w{len(idx.windows) + 1}"
-            text = "\n".join(idx.text_of(w, r) for r in w.members)
-            w.signals = signal_set(text)
-            w.score = salience(1, text, w.signals)
+            w.signals = signal_set("\n".join(idx.text_of(w, r) for r in w.members))
             idx.windows.append(w)
             idx.by_id[w.cid] = w
+    weights = signal_weights([w.signals for w in idx.windows])
+    for w in idx.windows:
+        text = "\n".join(idx.text_of(w, r) for r in w.members)
+        w.score = salience(1, text, sum(weights[s] for s in w.signals))
+    for name in tables:
+        if profiles[name].id_field:
+            for i in range(len(tables[name].rows)):
+                nid = idx.native_id(name, i)
+                if nid is not None:
+                    idx.id_lookup.setdefault(nid, (name, i))
+    idx.top_salient = [c.cid for c in sorted((c for c in clusters if c.size <= 5), key=lambda c: -c.score)
+                       [:TOP_SALIENT]]
+    idx.entities = build_entities(idx)
     if use_cache:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

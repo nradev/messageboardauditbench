@@ -15,7 +15,19 @@ from pathlib import Path
 
 from . import coverage
 from .cluster import Cluster
+from .fmt import (
+    PAGE,
+    diversify,
+    fmt_time,
+    footer,
+    paginate,
+    ref,
+    ref_id,
+    short_day,
+    snip,
+)
 from .index import Index, build_index
+from .query import cmd_count, cmd_entities, cmd_pivot
 
 HELP = """atlas: a map of a log corpus. Compress first, expand on request.
 
@@ -24,34 +36,20 @@ HELP = """atlas: a map of a log corpus. Compress first, expand on request.
   atlas clusters [--field T.F] [--sort salience|size|time] [--page N]
                                  list clusters of near-duplicate values (cNN) or windows (wNN)
   atlas expand ID [--n N]        open a cluster or window: span, actors, varied examples
-  atlas show REF [--offset N]    one row in full (REF = table:line, e.g. revisions:120)
+  atlas show REF [--offset N]    one row in full: REF = file:line (1-based line in the source
+                                 file, also valid in shell/python, e.g. logs:120) or the record's id
   atlas grep PATTERN [-i] [--field T.F] [--page N]
                                  regex search, hits grouped by cluster, rare hits first
   atlas unseen [--page N]        salient clusters you have not opened yet, plus coverage so far
+  atlas entities [--kind K] [--sort rare|count|first]
+                                 values to pivot on (field values, hosts, IPs, paths...), rare first
+  atlas pivot VALUE [--exact]    every row in any file containing VALUE, as one timeline
+  atlas count TABLE[.FIELD] [--where F=V|F!=V|F~RE ...] [--by day|hour|FIELD]
+                                 filtered counts and group-bys, no scripting needed
 
 Data directory: --data DIR or $ATLAS_DATA (default: current directory).
 Field guesses can be overridden: --time-field F --actor-field F[,F] --text-field F[,F].
 """
-
-PAGE = 15
-SNIP = 160
-
-
-# ---------- formatting helpers ----------
-
-
-def snip(text: str, n: int = SNIP) -> str:
-    t = re.sub(r"\s+", " ", text).strip()
-    return t if len(t) <= n else t[: n - 1] + "…"
-
-
-def fmt_time(dt) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "-"
-
-
-def short_day(dt) -> str:
-    return dt.strftime("%m-%d") if dt else "?"
-
 
 def span(idx: Index, c: Cluster) -> tuple:
     times = [t for t in (idx.time_of(c.table, r) for r in c.members) if t]
@@ -71,10 +69,6 @@ def top_actors(idx: Index, c: Cluster, k: int = 2) -> str:
     return "; ".join(parts)
 
 
-def ref(table: str, row: int) -> str:
-    return f"{table}:{row + 1}"
-
-
 def one_line(idx: Index, c: Cluster, width: int = 110) -> str:
     a, b = span(idx, c)
     when = short_day(a) if a == b or not b or short_day(a) == short_day(b) else f"{short_day(a)}→{short_day(b)}"
@@ -84,23 +78,6 @@ def one_line(idx: Index, c: Cluster, width: int = 110) -> str:
     who = top_actors(idx, c)
     text = c.template if c.template and c.size > 1 else idx.display_text(c, c.leader)
     return f"{head}  {who}\n         | {snip(text, width)}"
-
-
-def footer(*cmds: str) -> str:
-    return "→ next: " + " · ".join(c for c in cmds if c)
-
-
-def paginate(items: list, page: int, size: int = PAGE) -> tuple[list, str]:
-    total = len(items)
-    start = (page - 1) * size
-    shown = items[start : start + size]
-    if total > start + len(shown):
-        note = f"(showing {start + 1}-{start + len(shown)} of {total}; --page {page + 1} for more)"
-    elif total:
-        note = f"(showing {start + 1}-{start + len(shown)} of {total})"
-    else:
-        note = "(none)"
-    return shown, note
 
 
 # ---------- commands ----------
@@ -152,7 +129,7 @@ def cmd_overview(idx: Index, args) -> str:
         big = sorted(cl, key=lambda c: -c.size)[:n_big]
         out.append("  Biggest (the gist):")
         out += ["  " + one_line(idx, c, 100) for c in big]
-        sal = sorted((c for c in cl if c.size <= 5 and c not in big), key=lambda c: -c.score)[:n_sal]
+        sal = diversify(idx, sorted((c for c in cl if c.size <= 5 and c not in big), key=lambda c: -c.score))[:n_sal]
         if sal:
             out.append("  Most salient small clusters (rare + rich content):")
             out += ["  " + one_line(idx, c, 140) for c in sal]
@@ -161,10 +138,26 @@ def cmd_overview(idx: Index, args) -> str:
         out.append(f"\nLow-redundancy tables (mostly unique rows) are also split into {len(idx.windows)} "
                    f"windows of consecutive rows: atlas clusters --windows")
     best = next((c.cid for c in sorted(idx.clusters, key=lambda c: -c.score) if c.size <= 5), None)
-    out.append("\n" + footer(f"atlas expand {best}" if best else "", "atlas unseen", "atlas grep PATTERN",
-                             "atlas profile"))
+    out.append("\n" + footer(f"atlas expand {best}" if best else "", "atlas unseen", "atlas entities",
+                             "atlas grep PATTERN", "atlas profile"))
     coverage.record("overview", [], opened=opened, listed=listed)
     return "\n".join(out)
+
+
+def example_record(idx: Index, table: str) -> str:
+    """The first row with the most fields present, values shortened, as one line."""
+    rows = idx.tables[table].rows
+    best = max(range(min(len(rows), 2000)), key=lambda i: sum(v not in (None, "", []) for v in rows[i].values()),
+               default=None)
+    if best is None:
+        return "(empty)"
+    parts = []
+    for k, v in rows[best].items():
+        if v in (None, "", []):
+            continue
+        s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+        parts.append(f"{k}={snip(s, 60)}")
+    return f"[{ref(table, best)}] " + "  ".join(parts)
 
 
 def cmd_profile(idx: Index, args) -> str:
@@ -174,6 +167,7 @@ def cmd_profile(idx: Index, args) -> str:
             continue
         out.append(f"== {name}: {p.rows:,} rows  (time={p.time_field or '-'}, id={p.id_field or '-'}, "
                    f"actors={','.join(p.actor_fields[:3]) or '-'}, text={','.join(p.text_fields) or '-'})")
+        out.append("  example: " + example_record(idx, name))
         for fs in p.fields.values():
             line = f"  {fs.name:<22} {fs.role:<8} present {fs.present:>6,}  distinct {fs.distinct:>6,}"
             if fs.role == "time" and fs.tmin:
@@ -183,8 +177,11 @@ def cmd_profile(idx: Index, args) -> str:
             elif fs.role == "text":
                 line += f"  mean len {fs.mean_len:.0f}, max {fs.max_len:,}"
             else:
-                top = ", ".join(f"{snip(str(v), 30)}×{n}" for v, n in fs.top[:4])
-                line += f"  top: {top}"
+                if fs.top and fs.top[0][1] == 1:
+                    line += "  all values distinct, e.g. " + ", ".join(snip(str(v), 30) for v, _ in fs.top[:3])
+                else:
+                    top = ", ".join(f"{snip(str(v), 30)}×{n}" for v, n in fs.top[:4])
+                    line += f"  top: {top}"
                 if fs.rare:
                     line += "  rare: " + ", ".join(snip(str(v), 25) for v, _ in fs.rare[:3])
             out.append(line)
@@ -207,7 +204,7 @@ def cmd_clusters(idx: Index, args) -> str:
     elif args.sort == "time":
         units = sorted(units, key=lambda c: (span(idx, c)[0] is None, span(idx, c)[0] or 0))
     elif not args.windows:
-        units = sorted(units, key=lambda c: -c.score)
+        units = diversify(idx, sorted(units, key=lambda c: -c.score))
     shown, note = paginate(units, args.page)
     out = [f"{len(units):,} {'windows' if args.windows else 'clusters'}, sorted by "
            f"{'order' if args.windows and args.sort == 'salience' else args.sort} {note}"]
@@ -215,7 +212,8 @@ def cmd_clusters(idx: Index, args) -> str:
     nxt = f"atlas clusters --page {args.page + 1}" + (f" --field {args.field}" if args.field else "") \
         if len(units) > args.page * PAGE else ""
     out.append(footer(f"atlas expand {shown[0].cid}" if shown else "", nxt))
-    coverage.record("clusters", sys.argv[2:], listed=[c.cid for c in shown])
+    coverage.record("clusters", [args.field or "", args.sort, f"page={args.page}"] + (["windows"] if args.windows else []),
+                    listed=[c.cid for c in shown])
     return "\n".join(out)
 
 
@@ -293,7 +291,7 @@ def cmd_expand(idx: Index, args) -> str:
         t = idx.time_of(c.table, r)
         who = " ".join(f"{f}={v}" for f, v in idx.actor_of(c.table, r))
         text = idx.text_of(c, r)
-        out.append(f"--- {ref(c.table, r)}  {fmt_time(t)}  {who}")
+        out.append(f"--- {ref_id(idx, c.table, r)}  {fmt_time(t)}  {who}")
         if base_lines is not None and c.kind == "cluster":
             # Later members of a cluster: only what differs from the first one shown.
             out.append(diff_lines(base_lines, text, per))
@@ -311,16 +309,17 @@ def parse_ref(idx: Index, s: str) -> tuple[str, int] | None:
     table, _, line = s.rpartition(":")
     if table in idx.tables and line.isdigit() and 1 <= int(line) <= len(idx.tables[table].rows):
         return table, int(line) - 1
-    return None
+    return idx.id_lookup.get(s)  # the record's own id value
 
 
 def cmd_show(idx: Index, args) -> str:
     p = parse_ref(idx, args.ref)
     if not p:
-        return f"unknown ref {args.ref!r}; refs look like TABLE:LINE with TABLE one of {', '.join(idx.tables)}"
+        return (f"unknown ref {args.ref!r}; use FILE:LINE (1-based line number, FILE one of "
+                f"{', '.join(idx.tables)}) or a record id")
     table, row = p
     r = idx.tables[table].rows[row]
-    out = [f"{ref(table, row)}"]
+    out = [ref_id(idx, table, row)]
     opened = []
     limit = 6000
     for k, v in r.items():
@@ -362,6 +361,8 @@ def cmd_grep(idx: Index, args) -> str:
                     continue
                 if isinstance(v, list):
                     v = " ".join(str(x) for x in v)
+                elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                    v = str(v)  # numbers are searchable too
                 if not isinstance(v, str) or not rx.search(v):
                     continue
                 hit_rows.add((name, i))
@@ -376,7 +377,7 @@ def cmd_grep(idx: Index, args) -> str:
         return f"no matches for /{args.pattern}/" + (" (case-sensitive; add -i)" if not args.i else "")
     clusters = [idx.by_id[c] for c in groups]
     big = sorted((c for c in clusters if c.size > 5), key=lambda c: -len(groups[c.cid]))
-    small = sorted((c for c in clusters if c.size <= 5), key=lambda c: -c.score)
+    small = diversify(idx, sorted((c for c in clusters if c.size <= 5), key=lambda c: -c.score))
     out = [f"/{args.pattern}/: {len(hit_rows):,} rows; {len(clusters):,} clusters "
            f"({len(small):,} small, {len(big):,} big); {len(other):,} distinct values in other fields"]
     seen = []
@@ -391,14 +392,18 @@ def cmd_grep(idx: Index, args) -> str:
     if shown:
         out.append(f"\nSmall clusters with hits, most salient first {note}:")
         for c in shown:
-            row, text = groups[c.cid][0]
+            row, raw = groups[c.cid][0]
+            text = idx.display_text(c, row)  # without boilerplate lines, when the match survives
             m = rx.search(text)
+            if not m:
+                text = raw
+                m = rx.search(text)
             lo = max(0, m.start() - 220)
             ctx = ("…" if lo else "") + snip(text[lo : m.end() + 220], 460)
             t = idx.time_of(c.table, row)
             who = " ".join(f"{f}={v}" for f, v in idx.actor_of(c.table, row))
             sig = f" [{','.join(sorted(c.signals))}]" if c.signals else ""
-            out.append(f"{c.cid:>6} ×{c.size} {ref(c.table, row)} {fmt_time(t)} {who}{sig}\n         | {ctx}")
+            out.append(f"{c.cid:>6} ×{c.size} {ref_id(idx, c.table, row)} {fmt_time(t)} {who}{sig}\n         | {ctx}")
             seen.append(ref(c.table, row))
     if args.page == 1 and other:
         out.append("\nOther fields (value ×rows):")
@@ -412,7 +417,7 @@ def cmd_grep(idx: Index, args) -> str:
             for c in big]
     nxt = f"atlas grep {args.pattern!r} --page {args.page + 1}" if len(small) > args.page * PAGE else ""
     first = shown[0].cid if shown else (big[0].cid if big else "")
-    out.append("\n" + footer(f"atlas expand {first}" if first else "", nxt, "atlas unseen"))
+    out.append("\n" + footer(f"atlas expand {first}" if first else "", nxt, "atlas pivot VALUE", "atlas unseen"))
     coverage.record("grep", [args.pattern], seen_rows=seen, listed=[c.cid for c in shown])
     return "\n".join(out)
 
@@ -425,10 +430,12 @@ def cmd_unseen(idx: Index, args) -> str:
 
     small = [c for c in idx.clusters if c.size <= 5]
     big = [c for c in idx.clusters if c.size > 5]
-    rest = sorted((c for c in small if not is_seen(c)), key=lambda c: -c.score)
+    rest = diversify(idx, sorted((c for c in small if not is_seen(c)), key=lambda c: -c.score))
     s_seen = len(small) - len(rest)
     b_seen = sum(1 for c in big if is_seen(c))
-    out = [f"coverage: opened {s_seen:,}/{len(small):,} small clusters, {b_seen:,}/{len(big):,} big clusters"]
+    top_seen = sum(1 for cid in idx.top_salient if is_seen(idx.by_id[cid]))
+    out = [f"coverage: opened {top_seen}/{len(idx.top_salient)} of the most salient small clusters "
+           f"({s_seen:,}/{len(small):,} of all small clusters), {b_seen:,}/{len(big):,} big clusters"]
     if idx.windows:
         w_seen = sum(1 for w in idx.windows if is_seen(w))
         out[0] += f", {w_seen:,}/{len(idx.windows):,} windows"
@@ -469,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(HELP)
         return 0
-    commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen")
+    commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count")
     # Accept options before the command too (`atlas --data DIR overview`).
     first = next((i for i, a in enumerate(argv) if a in commands), None)
     if first:
@@ -506,6 +513,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--page", type=int, default=1)
     p = sub.add_parser("unseen", parents=[common])
     p.add_argument("--page", type=int, default=1)
+    p = sub.add_parser("entities", parents=[common])
+    p.add_argument("--kind")
+    p.add_argument("--sort", choices=["rare", "count", "first"], default="rare")
+    p.add_argument("--n", type=int, default=6)
+    p.add_argument("--page", type=int, default=1)
+    p = sub.add_parser("pivot", parents=[common])
+    p.add_argument("value")
+    p.add_argument("--exact", action="store_true")
+    p.add_argument("--case", action="store_true")
+    p.add_argument("--page", type=int, default=1)
+    p = sub.add_parser("count", parents=[common])
+    p.add_argument("target")
+    p.add_argument("--where", action="append")
+    p.add_argument("--by")
+    p.add_argument("--top", type=int, default=12)
+    p.add_argument("--buckets", type=int, default=20)
     try:
         args = ap.parse_args(argv)
     except SystemExit:
@@ -527,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         print(to_json(idx, args))
         return 0
     handler = {"overview": cmd_overview, "profile": cmd_profile, "clusters": cmd_clusters,
-               "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen}[args.cmd]
+               "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen,
+               "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count}[args.cmd]
     print(handler(idx, args))
     return 0

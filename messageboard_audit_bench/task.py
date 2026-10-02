@@ -84,7 +84,7 @@ from messageboard_audit_bench.incidents import (
     incident,
     incident_for_variant,
 )
-from messageboard_audit_bench.investigation_tools import parse_tools
+from messageboard_audit_bench.investigation_tools import parse_tools, prompt_addendum
 from messageboard_audit_bench.native import inspect_native_agent
 from messageboard_audit_bench.report_length import (
     acceptance_limits,
@@ -365,10 +365,12 @@ def _audit_task(
     }
     if investigation_tools:
         sample_metadata["investigation_tools"] = list(investigation_tools)
+        sample_metadata["investigation_tools_prompt"] = prompt_addendum(investigation_tools)
     if subscription_model is not None:
         sample_metadata["subscription_model"] = subscription_model
     sample = Sample(
-        input=_prompt_for(config, budget_min, runtime_fraction, benchmark_id, allow_drafts),
+        input=_prompt_for(config, budget_min, runtime_fraction, benchmark_id, allow_drafts)
+        + prompt_addendum(investigation_tools),
         id=f"{agent}:{backend}:{config}:{budget_min}m"
         + "".join(f"+{t}" for t in investigation_tools),
         metadata=sample_metadata,

@@ -115,3 +115,48 @@ def test_bad_input_explains_itself(corpus, capsys):
     assert "bad regex" in capsys.readouterr().out
     assert cli.main([]) == 0
     assert "atlas overview" in capsys.readouterr().out
+
+
+def test_show_by_record_id_and_ids_in_output(corpus, capsys):
+    args = ["--data", str(corpus)]
+    assert cli.main(["show", "r80", *args]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("posts:81 (id=r80)") and "rare_user" in out
+
+
+def test_profile_shows_an_example_record(corpus, capsys):
+    assert cli.main(["profile", "--data", str(corpus)]) == 0
+    assert "example: [posts:" in capsys.readouterr().out
+
+
+def test_entities_extracts_hosts_ips_paths_and_env(corpus, capsys):
+    idx = build_index(corpus, use_cache=False)
+    kinds = {k for k, _ in idx.entities}
+    assert {"host", "ip", "path", "posts.user"} <= kinds
+    assert ("host", "example.org") in idx.entities and ("ip", "10.0.0.5") in idx.entities
+    assert ("env", "HTTP_PROXY_OVERRIDE") in idx.entities
+    assert not any(k == "host" and v.endswith((".md", ".py")) for k, v in idx.entities)
+    assert cli.main(["entities", "--data", str(corpus)]) == 0
+    assert "example.org" in capsys.readouterr().out
+
+
+def test_pivot_builds_a_timeline_across_fields(corpus, capsys):
+    assert cli.main(["pivot", "rare_user", "--data", str(corpus)]) == 0
+    out = capsys.readouterr().out
+    assert "pivot 'rare_user': 1 rows" in out and "posts:81 (id=r80)" in out
+
+
+def test_count_with_where_and_by(corpus, capsys):
+    args = ["--data", str(corpus)]
+    assert cli.main(["count", "posts.user", "--where", "kind=post", "--where", "user!=rare_user", *args]) == 0
+    out = capsys.readouterr().out
+    assert "80 of 81 rows" in out and "user0" in out
+    assert cli.main(["count", "posts.user", "--by", "month", *args]) == 0
+    assert "2026-02" in capsys.readouterr().out
+    assert cli.main(["count", "posts.user", "--where", "bad", *args]) == 0
+    assert "bad --where" in capsys.readouterr().out
+
+
+def test_unseen_reports_coverage_of_top_salient(corpus, capsys):
+    assert cli.main(["unseen", "--data", str(corpus)]) == 0
+    assert "of the most salient small clusters" in capsys.readouterr().out

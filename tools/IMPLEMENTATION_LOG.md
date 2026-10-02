@@ -151,3 +151,173 @@ Branch `claude/atlas`, worktree `.worktrees/claude-atlas`.
 - Tests: `tests/test_atlas.py` (6 tests on synthetic data). `ruff` clean. The
   full suite has 2 failures in `tests/test_share_site.py` that also fail on
   `main`; unrelated to this work.
+
+## Step 5: telling the agent to use atlas (before the smoke pilot)
+
+- **Change.** The plan relied on the tool description alone so that prompt
+  bytes stayed identical across conditions. On review that tests "does a model
+  discover an unannounced tool" as much as "does the tool help", and the
+  auditing-agent work shows agents under-use tools they are not pointed to.
+  With `tools=atlas`, the task prompt now ends with one paragraph
+  (`TOOL_PROMPTS` in `messageboard_audit_bench/investigation_tools.py`) saying
+  how to use atlas: start with `overview`, drill in with
+  `expand`/`grep`/`show`, run `unseen` periodically and before finalising. It
+  says nothing about what to look for, so it is the same for any incident.
+  The tool description also now says "Start with `overview`".
+- The baseline prompt is unchanged (checked: the atlas prompt is the baseline
+  prompt plus 489 characters). The added text is stored as
+  `investigation_tools_prompt` in sample metadata.
+- Caveat for interpreting results: the conditions now differ by tool *and* by
+  an instruction. Some of any gain could come from the instruction itself
+  (e.g. "look for what you have not seen yet"). If the gain is large, a
+  control with the instruction's generic advice but no tool would separate the
+  two.
+
+## Step 6: fixes from implementation review (before the smoke pilot)
+
+A second agent reviewed v0.1 against real output. Applied:
+
+- **Domain word in the tool's own text.** The example ref in the tool
+  description and help was `revisions:120`, a table name from this dataset,
+  which broke the no-domain-words rule exactly where it matters most. Now
+  `logs:120`.
+- **Change: salience weights signals by rarity within the field.** Each signal
+  gets an IDF-like weight in [0, 1]: present in ≥50% of a field's clusters → 0,
+  in ≤1% → 1. Previously every signal counted the same, so signals carried by
+  nearly every record (URL and env-var names in link-heavy posts) inflated
+  scores without telling records apart.
+- **Low-information penalty.** Richness is multiplied by a compressibility
+  factor (zlib ratio of the first 4k chars; texts under 200 bytes exempt).
+  A 140-repeat `hello aaaa…` post dropped from about 6th to 2,704th in
+  `unseen`.
+- **`code` false positives.** Bare `public `/`private `/`static `/`return` at
+  line start matched English prose ("public OCR paths…"). Access modifiers now
+  need a following type/keyword; `return` needs a statement ending in `;`.
+- **`grep` ignored numbers.** Only string values were searched, so "no
+  matches" silently meant "no string matches". Ints and floats are now
+  searched as text.
+- **Coverage args for `clusters`** came from `sys.argv`, which is wrong after
+  the options-before-command reordering (and under pytest). Now built from the
+  parsed arguments. This matters because coverage is the process metric.
+- **`profile` noise on near-unique fields.** The `rare:` list is suppressed
+  when ≥90% of values are distinct (it was just arbitrary last rows), and
+  `top:` prints "all values distinct" instead of a list of ×1 values.
+- **Boilerplate in `grep` contexts.** Snippets now use the boilerplate-free
+  text when the match survives there.
+- Removed dead `Index.units()`.
+
+Not changed, by decision:
+- **Windows on single transcripts are still unranked.** Weighting cannot help
+  when every window carries every signal; on Mythos 5 the per-message
+  clusters still favour long technical messages. The real fix is novelty
+  ranking (`timeline --novel`).
+- **Partial duplicates** (the same block reposted inside different
+  wrappers) stay separate clusters; the reviewer checked that MinHash tracks
+  exact Jaccard (0.14–0.41) on such cases, so this is correct behaviour, not
+  calibration error. A containment measure is a possible later addition.
+- **`anomalies` and `entities`** are the biggest gaps (nothing else can
+  surface look-alike identifiers unless the agent already suspects them). They
+  come after the smoke pilot, which tests adoption, and before any graded
+  comparison.
+- Docs (`README.md` layout, `messageboard_audit_bench/README.md` task options)
+  to be updated once the tool settles.
+
+## Smoke pilot 1 (GLM 5.3, react, 10 min, tools=atlas)
+
+Log: `logs/atlas-smoke/2026-10-02T20-19-49-00-00_german-wiki-report_nT99q5gdHDg234ZE4UJGUB.eval`.
+
+- **Ran cleanly; scoring did not finish.** Report written (2,992 words).
+  Inspect gives scoring half of the sample time limit (`time_limit / 2`
+  in `inspect_ai/_eval/task/run.py`): (10 + 5 min guard) / 2 = 450s. The
+  sheet scorer grades the 8 `v2` sheets **sequentially**; with
+  `openai/gpt-6-astra` each took 50–73s, so the 8th was cancelled and `tldrh`
+  never ran. Round 4 avoided this by scoring after generation
+  (`score_during_generation = false`). Not an atlas problem.
+- **Adoption: yes, but only for orientation.** 11 of 83 tool calls were atlas,
+  all within the first ~80s of tool activity: `overview`, `profile` ×3,
+  `expand` of the top two salient clusters, two `atlas grep`s, one `unseen`,
+  two `show`s. After that, 43 bash calls (mostly ad-hoc Python over the JSONL)
+  and 29 report edits; atlas was never used again, and `unseen` was not run
+  before finalising despite the prompt.
+- **The intended mechanism did fire once:** the agent expanded the top
+  salient singleton from `overview`, then ran an `atlas grep` built from terms
+  it found there.
+- **What it went to bash for:** structured, non-text analysis: delete-event
+  counts and sequences, per-IP/label relationships, referrers, request
+  payload decoding, per-minute rates. atlas has no commands for these yet;
+  they map onto `entities`/`pivot`, `anomalies` (bursts) and `timeline`.
+- atlas output was 1.8k–10k chars per call (~51k chars over 11 calls);
+  `grep` and `overview` are the largest.
+- The agent wrote its first report draft at ~48s of tool activity and spent
+  most of the run editing it, so there was little exploration time in which
+  `unseen` would have mattered.
+
+## Step 7: changes from the smoke pilot (refs, examples, diversity, entities, pivot, count, metrics)
+
+Prioritised from what the pilot agent did in bash (filter-and-count scripts,
+one value across files in time order, joins, decoding, identifier scans), not
+from which known findings it missed. A reviewer read the run against the
+answer key; we kept the conclusions that also follow from behaviour alone.
+
+- **References.** Rows now print `file:line (idfield=value)`, e.g.
+  `events:7 (event_id=request:dse:2026-05-24:3)`; `show` also accepts the
+  record's own id; help and tool description say lines are 1-based and valid
+  in shell/python. The pilot agent spent several calls checking this.
+- **`profile` shows an example record per file** (the first of the
+  most-complete rows, values shortened). The pilot agent ran `head -c` on
+  every file right after `profile`.
+- **Change: diversity (MMR) in `overview`, `clusters`, `grep` and `unseen`.**
+  First version used word-set Jaccard between leaders; it barely changed page
+  1 (mean similarity 0.06 → 0.05) because long posts on the same topic share
+  few words. **Switched to overlap of mid-frequency "topic words"** (document
+  frequency 2–15% of the 300-item pool), which separates topics clearly
+  (same-topic pairs 0.5–0.67, unrelated pairs mostly <0.1). Page 1 of `unseen`
+  now spans ~12 topics instead of 3–4, keeps 9 of the plain top 15, and still
+  starts with the highest-scoring item; cost 0.07s.
+- **Coverage framed against the top salient set.** `unseen` now reports
+  "opened k/50 of the most salient small clusters" before the total over all
+  ~6,200 small clusters, which reads as hopeless.
+- **New: `entities`.** Values of short repeated identifier/category fields
+  (`table.field`) plus hosts, IPs, paths, env-var names and e-mail addresses
+  extracted from any string field; per value: rows, first/last seen, top
+  actors. Summary shows each kind's commonest values and rarest ones;
+  `--kind K --sort rare|count|first` pages through one kind.
+  - Fields with >50% distinct values (foreign keys like a per-row reference)
+    are excluded: they produced 14,591 meaningless "entities".
+  - **Change: hosts outside URLs need a country-code or common generic TLD.**
+    `name.ext` tokens (`wiki.cgi`, `window.location`, `123.xlsx`) were being
+    counted as hosts. Hosts inside URLs are always kept.
+  - **Change: env names only when used as variables** (`$NAME`, `${NAME}`,
+    `NAME=…`, `export NAME`, `getenv`/`environ`). Upper-case words in prose
+    were flooding the list. Consequence: the wiki corpus now has no env
+    entities (its posts mention such names only in prose); Mythos 5 has 16
+    real ones. We deliberately did **not** add a suffix list (`_PROXY`,
+    `_KEY`, …) that would restore the wiki's mentions, because that would
+    mainly serve one known finding; `grep` still finds them.
+  - Bug found by tests: kinds with a single value were hidden from the
+    summary, which is exactly the long tail on small corpora. Fixed.
+- **New: `pivot VALUE`.** Every row in any file and field containing the value
+  (substring, case-insensitive; `--exact` for whole values), with which
+  fields matched, co-occurring actors/categories, per-day counts, then one
+  merged timeline (25 per page). Rows show only short actor/category values,
+  skipping values that repeat one already shown (page / wiki/page /
+  wiki~page) and the pivot value itself. 0.6s on the wiki corpus.
+- **New: `count TABLE[.FIELD]`** with `--where F=V | F!=V | F~REGEX`
+  (repeatable, AND) and `--by day|hour|month|FIELD`. Top values, tail summary
+  (how many values occur once), and per-value buckets. The footer suggests
+  pivoting on the *rarest* top value, not the commonest.
+- **Prompt and tool description** now mention `entities`, `pivot` and `count`
+  ("for questions about one value or one field … before writing a script").
+- **`tools/atlas/usage_metrics.py`**: per sample, tool calls by function,
+  atlas calls by subcommand and share, first/last atlas call (s and % of tool
+  activity), `unseen` count and last time, clusters opened, coverage of the
+  top-50 salient set (with `--data`), report words, scores. On smoke pilot 1:
+  11/91 calls (12%), last atlas call at 18% of tool activity, 1 `unseen` at
+  13%, 3/50 top salient opened (against today's ranking).
+- Costs: index build on the wiki corpus went from ~6s to ~11–13s (entity
+  extraction). It runs during setup, inside the budget's wall clock but
+  before the agent's own limit starts, so the agent's time-left notes read
+  ~13s (~2% of 10 min) low. Calls take 0.6–0.8s (larger pickled index).
+- Verified: 13 atlas tests pass; ruff clean; full suite only has the 2
+  pre-existing `test_share_site.py` failures; scripted mock run in the real
+  sandbox exercised `overview`, `expand`, `entities`, `pivot`, `count`, `grep`.

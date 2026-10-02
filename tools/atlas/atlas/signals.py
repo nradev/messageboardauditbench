@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+import zlib
 
 URL = re.compile(r"\b(?:[a-z][a-z0-9+.-]*://|www\.)[^\s\"'<>()\[\]{}|\\^`]+", re.I)
 HOST = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,24})\b", re.I)
@@ -23,7 +24,9 @@ SHELL = re.compile(
 )
 CODE = re.compile(
     r"```|^\s*(?:def |class |import |from \S+ import |#include|function\s*\(|function \w+\(|"
-    r"(?:const|let|var) \w+ =|public |private |static |return\b|for \(|while \(|if \()",
+    r"(?:const|let|var) \w+ =|(?:public|private|protected) (?:static |final |async )*"
+    r"(?:void|int|long|bool|boolean|string|String|class|def|fn|func)\b|return [^\n]*;\s*$|"
+    r"for \(|while \(|if \()",
     re.M,
 )
 # Common file-like suffixes that the host pattern would otherwise treat as domains.
@@ -34,11 +37,25 @@ _NOT_TLD = {
 }
 
 
+# Bare host names (outside URLs) must end in a country code or a common generic TLD;
+# otherwise ``name.ext`` tokens (file names, object.attribute) would count as hosts.
+_GENERIC_TLDS = set(
+    "com net org edu gov mil int info biz name pro io ai dev app cloud site online tech xyz top live "
+    "life run page link me tv cc ws fm am to sh gg ly co us uk eu de fr nl ru cn jp in br au ca "
+    "mobi asia tel travel jobs museum coop aero arpa local internal lan localhost corp home "
+    "workers pages store shop blog news media digital space website world global network systems "
+    "services solutions support host hosting email cam fun club vip work tools one zone".split()
+)
+
+
 def hosts(text: str) -> set[str]:
     out = set()
     for m in HOST.finditer(text):
         h = m.group(0).lower()
-        if h.rsplit(".", 1)[-1] in _NOT_TLD or h.replace(".", "").isdigit():
+        tld = h.rsplit(".", 1)[-1]
+        if tld in _NOT_TLD or h.replace(".", "").isdigit():
+            continue
+        if len(tld) != 2 and tld not in _GENERIC_TLDS:
             continue
         out.add(h)
     return out
@@ -80,7 +97,33 @@ def signal_set(text: str) -> set[str]:
     return s
 
 
-def salience(size: int, text: str, signals: set[str]) -> float:
+def signal_weights(signal_sets: list[set[str]]) -> dict[str, float]:
+    """Weight each signal by how rare it is among a field's clusters (IDF-like, in [0, 1]):
+    present in half or more of them -> 0, in 1% or fewer -> 1. A signal that nearly every
+    record carries says nothing about which record is unusual."""
+    n = len(signal_sets) or 1
+    counts: dict[str, int] = {}
+    for s in signal_sets:
+        for x in s:
+            counts[x] = counts.get(x, 0) + 1
+    out = {}
+    for x, k in counts.items():
+        df = k / n
+        out[x] = max(0.0, min(1.0, math.log(0.5 / df) / math.log(0.5 / 0.01))) if df < 0.5 else 0.0
+    return out
+
+
+def information(text: str) -> float:
+    """1 for ordinary text, approaching 0 for highly repetitive text (``aaaa…``), from the
+    zlib compression ratio of its first 4,000 characters."""
+    sample = text[:4000].encode("utf-8", "replace")
+    if len(sample) < 200:
+        return 1.0
+    ratio = len(zlib.compress(sample)) / len(sample)
+    return min(1.0, ratio / 0.25)
+
+
+def salience(size: int, text: str, signal_weight: float) -> float:
     rarity = 1.0 / math.sqrt(max(size, 1))
-    richness = (1.0 + math.log1p(len(text)) / 4.0) * (1.0 + 0.5 * len(signals))
+    richness = (1.0 + math.log1p(len(text)) / 4.0) * (1.0 + 0.5 * signal_weight) * information(text)
     return rarity * richness
