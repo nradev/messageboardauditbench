@@ -31,6 +31,11 @@ from inspect_ai.util import LimitExceededError, sandbox, time_limit
 from inspect_swe import claude_code, codex_cli
 
 from messageboard_audit_bench.audit import trajectory_metrics
+from messageboard_audit_bench.investigation_tools import atlas as atlas_tool
+from messageboard_audit_bench.investigation_tools import (
+    install_atlas,
+    read_atlas_coverage,
+)
 from messageboard_audit_bench.native_telemetry import event_coverage, hook_coverage
 from messageboard_audit_bench.provenance import host_provenance
 from messageboard_audit_bench.report_length import (
@@ -178,6 +183,7 @@ def inspect_agent(
     claude_disallowed_tools: Sequence[str],
     env: dict[str, str] | None = None,
     codex_features_off: Sequence[str] = (),
+    extra_tools: Sequence[Tool] = (),
 ) -> Agent:
     """Return the first-class Inspect agent selected by the task.
 
@@ -211,6 +217,7 @@ def inspect_agent(
             tools=[
                 _with_react_feedback(bash(), env),
                 _with_react_feedback(text_editor(), env),
+                *(_with_react_feedback(t, env) for t in extra_tools),
             ],
             retry_refusals=REFUSAL_RETRY_LIMIT,
         )
@@ -460,6 +467,7 @@ def inspect_native_agent(
     min_runtime_fraction: float = 0.75,
     seed_reports: dict[int, str] | None = None,
     codex_features_off: Sequence[str] = (),
+    investigation_tools: Sequence[str] = (),
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -472,6 +480,8 @@ def inspect_native_agent(
     update throughout the investigation. Unexpected agent or sandbox failures
     still fail the sample normally.
     """
+    if investigation_tools and agent != "react":
+        raise ValueError("investigation tools are only wired into agent=react so far")
     if not 0 <= min_runtime_fraction < 1:
         raise ValueError("min_runtime_fraction must be between 0 (inclusive) and 1")
     minimum_runtime_seconds = math.ceil(time_limit_seconds * min_runtime_fraction)
@@ -501,6 +511,10 @@ def inspect_native_agent(
             report_min_words,
             report_max_words,
         )
+        extra_tools = []
+        if "atlas" in investigation_tools:
+            state.metadata["atlas_install"] = await install_atlas()
+            extra_tools.append(atlas_tool())
         seed_report = (
             seed_reports.get(int(state.metadata.get("parent_epoch", -1)))
             if seed_reports
@@ -520,6 +534,7 @@ def inspect_native_agent(
             agent,
             claude_disallowed_tools=claude_disallowed_tools,
             codex_features_off=codex_features_off,
+            extra_tools=extra_tools,
             env={
                 "MBAB_DEADLINE_EPOCH": str(deadline_epoch),
                 "MBAB_EARLIEST_FINISH_EPOCH": str(earliest_finish_epoch),
@@ -632,6 +647,8 @@ def inspect_native_agent(
             minimum_runtime_reached = (
                 time.monotonic() - started >= minimum_runtime_seconds
             )
+            if "atlas" in investigation_tools:
+                state.metadata["atlas_coverage"] = await read_atlas_coverage()
             if agent != "react":
                 ids = [
                     call.id

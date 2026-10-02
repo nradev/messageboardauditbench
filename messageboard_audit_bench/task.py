@@ -84,6 +84,7 @@ from messageboard_audit_bench.incidents import (
     incident,
     incident_for_variant,
 )
+from messageboard_audit_bench.investigation_tools import parse_tools
 from messageboard_audit_bench.native import inspect_native_agent
 from messageboard_audit_bench.report_length import (
     acceptance_limits,
@@ -293,6 +294,7 @@ def _audit_task(
     extra_sample_metadata: dict | None = None,
     extra_task_metadata: dict | None = None,
     allow_drafts: bool = False,
+    tools: str | None = None,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -327,6 +329,9 @@ def _audit_task(
         raise ValueError(
             "subscription uses the restricted proxy with shell-accessible credentials; choose backend=inspect for offline tools"
         )
+    investigation_tools = parse_tools(tools)
+    if investigation_tools and (agent != "react" or backend != "inspect"):
+        raise ValueError("tools= is only supported with agent=react and backend=inspect")
     budget_min = _time_limit(time_limit_minutes, int(cfg["budget_min"]))
     runtime_fraction = _min_runtime_fraction(min_runtime_fraction)
     minimum_runtime_seconds = runtime_policy.minimum_runtime_seconds(
@@ -358,11 +363,14 @@ def _audit_task(
         "report_accept_max_words": acceptance_limits(cfg)[1],
         **(extra_sample_metadata or {}),
     }
+    if investigation_tools:
+        sample_metadata["investigation_tools"] = list(investigation_tools)
     if subscription_model is not None:
         sample_metadata["subscription_model"] = subscription_model
     sample = Sample(
         input=_prompt_for(config, budget_min, runtime_fraction, benchmark_id, allow_drafts),
-        id=f"{agent}:{backend}:{config}:{budget_min}m",
+        id=f"{agent}:{backend}:{config}:{budget_min}m"
+        + "".join(f"+{t}" for t in investigation_tools),
         metadata=sample_metadata,
     )
     if backend == "inspect":
@@ -374,6 +382,7 @@ def _audit_task(
             report_max_words=limits(cfg)[1],
             min_runtime_fraction=runtime_fraction,
             codex_features_off=URLQUERY_CODEX_FEATURES_OFF if benchmark_id == "urlquery" else (),
+            investigation_tools=investigation_tools,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -450,6 +459,7 @@ def _german_wiki_report(
     rubric: str | None = None,
     data_variant: str | None = None,
     version: str | None = None,
+    tools: str | None = None,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -477,6 +487,8 @@ def _german_wiki_report(
         version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``10.0``). The task
             refuses to run if this checkout is a different version; use
             ``scripts/run_eval.py --version`` to run another one.
+        tools: Comma-separated investigation tools for ``agent=react`` (currently
+            ``atlas``; see ``tools/``). Default none, which is the published condition.
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -492,6 +504,7 @@ def _german_wiki_report(
         min_runtime_fraction=min_runtime_fraction,
         data_variant=data_variant,
         scorers=_scorers(judge, rubric, variant),
+        tools=tools,
     )
 
 
@@ -530,6 +543,7 @@ def _transluce_report(
     judge_effort: str | None = None,
     article_context: str | None = None,
     version: str | None = None,
+    tools: str | None = None,
 ) -> Task:
     """Run one sandboxed Transluce report trial on the pinned urlquery.net snapshot.
 
@@ -560,6 +574,7 @@ def _transluce_report(
         time_limit_minutes=time_limit_minutes,
         min_runtime_fraction=min_runtime_fraction,
         data_variant=None,
+        tools=tools,
         scorers=[
             finding_scorer(judge=judge, effort=judge_effort, article_context=article_context),
             process_metrics(),

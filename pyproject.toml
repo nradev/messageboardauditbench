@@ -69,6 +69,7 @@ include = [
     "scripts/run_round4.py",
     "scripts/score_reports.py",
     "tests/**/*.py",
+    "tools/atlas/**/*.py",
 ]
 
 [tool.ruff.lint]

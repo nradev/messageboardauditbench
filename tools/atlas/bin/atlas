@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run atlas from anywhere: resolves the package next to this script.
+DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m atlas "$@"
