@@ -528,7 +528,7 @@ def _german_wiki_report(
             or ``legacy`` for the old starter rubric.
         data_variant: Override the config's dataset, including
             ``verbatim_anthropic`` for the provider attribution ablation.
-        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``11.0``). The task
+        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``12.0``). The task
             refuses to run if this checkout is a different version; use
             ``scripts/run_eval.py --version`` to run another one.
     """
