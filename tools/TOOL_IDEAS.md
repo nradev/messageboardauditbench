@@ -571,6 +571,54 @@ questions, on any corpus.
 reader output on all three local corpora (are quotes verbatim, are notes on
 schema, how many records per call fit the caps); then paired runs.
 
+**Decisions from the pre-build review.**
+- *Getting records.* The data lives in the sandbox, the model calls on the
+  host. A new `atlas records SET --json --limit N` resolves any set (theme,
+  cluster, grep hits, `rows` filter, pivot value, window) into records with
+  ids and size-capped text; the host tool runs it in the sandbox. Atlas stays
+  the one definition of a set, and the crew tools stay corpus-agnostic.
+- *Quote checking.* Against the records that reader was sent, not the whole
+  corpus (stricter: the cited id must contain the quote), reusing atlas's
+  `normalize`/`match_quote` imported on the host.
+- *Merging.* `ask` and `sweep` merge chunk outputs in code (group by schema
+  field, drop duplicates, cap size): no second model pass, no new chance to
+  invent. `brief` uses one pass if the set fits, otherwise map then one reduce
+  call that may only restate cited claims.
+- *Time cost.* A blocking tool call spends the agent's budget, so readers run
+  concurrently (about 8), each with a timeout, and one tool call is capped at
+  about 60–90 s of wall time. After the on-demand tools, an optional
+  `-T sweep_at_start=true` runs `sweep` in the background from t=0 and
+  delivers the digest when ready (breadth without spending turns).
+- *Rate limits.* Readers share the agent's provider; the concurrency cap
+  limits contention, and reader latency is recorded in metadata.
+- *Coverage.* Records a reader read get a fourth coverage state, `read`
+  (between shown and opened), so `unseen` does not send the agent back to
+  them.
+- *Interface.* One Inspect tool `crew` with `brief`, `ask`, `sweep`
+  (host-side, so not callable from bash), one prompt paragraph, and
+  `-T crew=true` so arms differ by one flag.
+- *Build order.* R1 → R3 `brief` → R2 `ask` → R4 `sweep` → (later) R5. `brief`
+  first: the pilots showed atlas helps discovery but not depth, `brief` is the
+  depth tool, and one set with one schema is the simplest plumbing test.
+- *Reader model* stays the agent's model by default.
+- *Status (implementation log steps 14–16):* R1, R3 `brief`, R2 `ask` and R4
+  `sweep` (with `-T sweep_at_start`) are built and checked with real readers on
+  all three local corpora. Not yet piloted. R5 (ledger) is open.
+
+**Noted for later: a token budget as a second budget mode.** Wall-clock
+budgets mix tool quality with provider and model throughput (pilot 4's slow
+provider; slower calls in pilot 5's atlas arm), so comparisons across models,
+providers or days are confounded. Kept wall time for now, with paired runs
+at the same time on a pinned provider. If added, a token mode should count
+the readers' tokens: a turn limit would favour the crew, because one call
+runs many reader calls, and an output-only limit would make reading free.
+Candidates are total tokens, or uncached input plus output if caching
+distorts things. The time-based mechanics would read a token-based share of
+the budget instead: the minimum-runtime rule, time-left notes,
+`policy_aware_continue`, `gapcheck_at`, and the crew's call timeout. Calibrate
+the token budget to what a typical 10-minute run uses today. Meanwhile,
+report tokens (agent and readers), calls and cost next to the scores.
+
 ## Evaluation plan for both
 
 - Paired arms run at the same time, same provider and options, ≥3 epochs

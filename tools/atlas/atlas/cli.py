@@ -29,6 +29,7 @@ from .fmt import (
 from .gapcheck import cmd_gapcheck
 from .index import Index, build_index
 from .query import cmd_count, cmd_entities, cmd_join, cmd_pivot, cmd_rows
+from .records import DEFAULT_CHARS, DEFAULT_LIMIT, cmd_mark, cmd_records
 from .themes import related
 from .timeline import cmd_timeline
 
@@ -538,20 +539,26 @@ def cmd_unseen(idx: Index, args) -> str:
     shown as a one-line entry in some listing, opened (expanded or shown in full). Records
     not shown yet come first, so calling `unseen` again brings up new material."""
     opened, seen_rows, listed = coverage.load()
+    read_rows = coverage.load_read()
 
     def is_opened(c: Cluster) -> bool:
         return c.cid in opened or any(ref(c.table, r) in seen_rows for r in c.members[:50])
 
+    def is_read(c: Cluster) -> bool:  # read by a reader of the reading crew, not by the agent
+        return any(ref(c.table, r) in read_rows for r in c.members[:50])
+
     small = [c for c in idx.clusters if c.size <= 5 and not is_trivial(idx, c)]
     big = [c for c in idx.clusters if c.size > 5 and not is_trivial(idx, c)]
     ranked = diversify(idx, sorted((c for c in small if not is_opened(c)), key=lambda c: -c.score))
-    fresh = [c for c in ranked if c.cid not in listed]
-    shown_before = [c for c in ranked if c.cid in listed]
-    rest = fresh + shown_before
+    fresh = [c for c in ranked if c.cid not in listed and not is_read(c)]
+    shown_before = [c for c in ranked if c.cid in listed and not is_read(c)]
+    read_only = [c for c in ranked if is_read(c)]
+    rest = fresh + shown_before + read_only
     top = [idx.by_id[cid] for cid in idx.top_salient]
     out = [f"coverage of the {len(top)} most salient rare records: shown {sum(c.cid in listed for c in top)}, "
            f"opened {sum(is_opened(c) for c in top)}; all rare records: shown "
-           f"{sum(c.cid in listed for c in small):,}, opened {sum(is_opened(c) for c in small):,} of {len(small):,}"]
+           f"{sum(c.cid in listed for c in small):,}, opened {sum(is_opened(c) for c in small):,} of {len(small):,}"
+           + (f"; read by readers {sum(is_read(c) for c in small):,}" if read_rows else "")]
     if idx.windows:
         w_open = sum(1 for w in idx.windows if is_opened(w))
         out[0] += f"; windows opened {w_open:,}/{len(idx.windows):,}"
@@ -572,8 +579,9 @@ def cmd_unseen(idx: Index, args) -> str:
     label = "not shown before" if shown and shown[0].cid not in listed else "shown before but not opened"
     out.append(f"\nRare records not opened, {label} first, most salient first {note}:")
     out += [one_line(idx, c, 120, rel=True) for c in shown]
-    if fresh and len(fresh) < len(rest):
-        out.append(f"  ({len(fresh):,} not shown before; {len(shown_before):,} shown in earlier lists but not opened)")
+    if (fresh and len(fresh) < len(rest)) or read_only:
+        out.append(f"  ({len(fresh):,} not shown before; {len(shown_before):,} shown in earlier lists but not opened"
+                   + (f"; {len(read_only):,} read only by readers, listed last" if read_only else "") + ")")
     if idx.windows:
         wins = [w for w in idx.windows if not is_opened(w)]
         out.append(f"\nUnopened windows ({len(wins)}), in order: " + " ".join(w.cid for w in wins[:30]) +
@@ -605,7 +613,7 @@ def main(argv: list[str] | None = None) -> int:
         print(HELP)
         return 0
     commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count",
-                "themes", "rows", "join", "timeline", "gapcheck")
+                "themes", "rows", "join", "timeline", "gapcheck", "records", "mark")
     # Accept options before the command too (`atlas --data DIR overview`).
     first = next((i for i, a in enumerate(argv) if a in commands), None)
     if first:
@@ -677,6 +685,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--by")
     p.add_argument("--top", type=int, default=12)
     p.add_argument("--buckets", type=int, default=20)
+    # For the reading crew (host-side readers): a set as JSON records, and read marks.
+    p = sub.add_parser("records", parents=[common])
+    p.add_argument("set")
+    p.add_argument("--where", action="append")
+    p.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    p.add_argument("--chars", type=int, default=DEFAULT_CHARS)
+    p.add_argument("--n", type=int, default=10)
+    p = sub.add_parser("mark", parents=[common])
+    p.add_argument("refs", nargs="*")
+    p.add_argument("--label")
     try:
         args = ap.parse_args(argv)
     except SystemExit:
@@ -700,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     handler = {"overview": cmd_overview, "profile": cmd_profile, "clusters": cmd_clusters,
                "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen,
                "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count, "themes": cmd_themes,
-               "rows": cmd_rows, "join": cmd_join, "timeline": cmd_timeline, "gapcheck": cmd_gapcheck}[args.cmd]
+               "rows": cmd_rows, "join": cmd_join, "timeline": cmd_timeline, "gapcheck": cmd_gapcheck,
+               "records": cmd_records, "mark": cmd_mark}[args.cmd]
     print(handler(idx, args))
     return 0

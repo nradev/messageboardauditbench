@@ -18,7 +18,7 @@ from inspect_ai.util import sandbox
 
 from messageboard_audit_bench.runtime import repo_root
 
-SUPPORTED_TOOLS = ("atlas",)
+SUPPORTED_TOOLS = ("atlas", "crew")
 # Everything runs as the sandbox's only permitted user (uid 1000, HOME=/home/agent).
 ATLAS_HOME = "/home/agent/.local/share/atlas"
 ATLAS_BIN = "/home/agent/.local/bin/atlas"
@@ -48,18 +48,56 @@ TOOL_PROMPTS = {
         "as written); Consider items are optional, so include one only if it is material to "
         "your account. Plain shell tools remain available for anything atlas does not cover.\n"
     ),
+    "crew": (
+        "\n\nYou also have `crew`, a reading crew. Within your budget you can read only a small "
+        "part of the corpus yourself; the crew's readers read 60 to 150 records in parallel in "
+        "about 15 to 30 seconds, outside your turns, which would take you dozens of turns. They "
+        "return short notes, each with a record ref and an exact quote checked against the "
+        "record. Use it whenever reading more would change your account: `crew sweep` early "
+        "on, for a cross-section of the corpus beyond what atlas lists (each call moves on to "
+        "records not read yet); `crew brief SET` to understand a theme, cluster or event in "
+        "depth instead of sampling a few records; `crew ask SET` with a question to check every "
+        "record in a set (grep hits, filtered rows, a theme) for the answer, including whether "
+        "something never happens. Sets are atlas ids (tNN, cNN, wNN), grep:REGEX, pivot:VALUE, "
+        "rows:TABLE with filters, around:REF or refs:A,B. Readers see only the records given to "
+        "them and can miss things, so confirm what you rely on with `atlas show`.\n"
+    ),
 }
+
+# Added to the continue messages sent when the agent tries to finish before the minimum
+# investigation time, naming only the tools of this arm. Baseline runs (no tools) keep the
+# published wording.
+CONTINUE_HINTS = {
+    "atlas": "`atlas unseen` lists salient records you have not looked at",
+    "crew": "`crew sweep` has readers go through records you have not read yet, and "
+            "`crew ask SET` checks a whole set against a question",
+}
+
+
+def continue_hint(tools: tuple[str, ...]) -> str:
+    hints = [CONTINUE_HINTS[t] for t in tools if t in CONTINUE_HINTS]
+    if not hints:
+        return ""
+    return (
+        " Use the remaining time to widen the investigation rather than polish wording: look "
+        "for activity, actors, periods or explanations your report does not cover yet. "
+        + "For example: " + "; ".join(hints) + "."
+    )
 
 
 def prompt_addendum(tools: tuple[str, ...]) -> str:
     return "".join(TOOL_PROMPTS[t] for t in tools)
 
 
-def parse_tools(value: str | None) -> tuple[str, ...]:
-    names = tuple(sorted({n.strip() for n in (value or "").split(",") if n.strip()}))
+def parse_tools(value: str | list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    # Inspect's CLI turns `-T tools=atlas,crew` into a list; Python callers pass a string.
+    parts = value if isinstance(value, (list, tuple)) else (value or "").split(",")
+    names = tuple(sorted({str(n).strip() for n in parts if str(n).strip()}))
     unknown = [n for n in names if n not in SUPPORTED_TOOLS]
     if unknown:
         raise ValueError(f"unknown investigation tools {unknown}; choose from {', '.join(SUPPORTED_TOOLS)}")
+    if "crew" in names and "atlas" not in names:
+        raise ValueError("tools=crew needs atlas too (tools=atlas,crew): readers get their records from atlas")
     return names
 
 

@@ -105,6 +105,25 @@ def summarize(path: Path, data: Path | None) -> list[str]:
             top = set(idx.top_salient)
             out.append(f"    most salient rare records: shown {len(listed & top)}/{len(top)}, opened {len(opened & top)}/{len(top)}"
                        + ("" if any(isinstance(c.get("listed"), list) for c in cov) else " (log predates shown-tracking)"))
+        crew = s.metadata.get("crew")
+        if crew:
+            calls = crew.get("tool_calls") or []
+            ret = crew.get("notes_returned") or 0
+            lat = crew.get("latencies") or {}
+            out.append(f"    crew calls {len(calls)}: " + ", ".join(f"{c['action']} {c['set']} ({c['seconds']}s, "
+                                                               f"{c['finished']}/{c['readers']} readers, {c['notes']} notes)"
+                                                               for c in calls[:6]))
+            out.append(f"    crew readers {crew.get('reader_calls')} calls, {crew.get('input_tokens', 0):,} in / "
+                       f"{crew.get('output_tokens', 0):,} out tokens, median {lat.get('median')}s; quotes verified "
+                       f"{crew.get('notes_verified')}/{ret}" + (f" ({crew.get('notes_verified', 0) / ret:.0%})" if ret else "")
+                       + f", timeouts {crew.get('timeouts')}, errors {crew.get('errors')}")
+            bg = s.metadata.get("crew_sweep_at_start")
+            if bg:
+                out.append(f"    background sweep: finished {bg.get('finished')}, delivered at "
+                           f"{bg.get('delivered_share')} of the budget")
+            if s.metadata.get("atlas_coverage"):
+                read = {r for c in s.metadata["atlas_coverage"] for r in c.get("read", [])}
+                out.append(f"    rows read by readers {len(read)}")
         words = s.metadata.get("report_words")
         if words is not None:
             out.append(f"    report words {words}")

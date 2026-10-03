@@ -34,11 +34,18 @@ from messageboard_audit_bench.audit import trajectory_metrics
 from messageboard_audit_bench.investigation_tools import atlas as atlas_tool
 from messageboard_audit_bench.investigation_tools import (
     auto_gapcheck,
+    continue_hint,
     install_atlas,
     read_atlas_coverage,
 )
 from messageboard_audit_bench.native_telemetry import event_coverage, hook_coverage
 from messageboard_audit_bench.provenance import host_provenance
+from messageboard_audit_bench.reading_crew import (
+    Crew,
+    crew_tool,
+    start_background_sweep,
+    take_background_digest,
+)
 from messageboard_audit_bench.report_length import (
     acceptance_limits,
     count_words,
@@ -178,7 +185,7 @@ def _with_react_feedback(base: Tool, env: dict[str, str]) -> Tool:
     ).as_tool()
 
 
-def policy_aware_continue(earliest_finish_epoch: int, clock=time.time):
+def policy_aware_continue(earliest_finish_epoch: int, clock=time.time, hint: str = ""):
     """``react`` on_continue hook that respects the minimum-runtime policy.
 
     Inspect's default nudge, sent whenever the model stops calling tools, invites it to
@@ -199,19 +206,25 @@ def policy_aware_continue(earliest_finish_epoch: int, clock=time.time):
             "Keep investigating with your tools: verify the evidence behind your claims, "
             "look for counterevidence, examine records you have not looked at yet, and "
             "improve report.md. Do not idle or merely restate your conclusion."
+            + hint
         )
 
     return on_continue
 
 
 def combined_continue(policy_epoch: int | None, gapcheck_epoch: int | None, record: dict,
-                      runner=None, clock=time.time):
+                      runner=None, clock=time.time, crew=None, hint: str = ""):
     """One ``react`` on_continue hook for the optional behaviours: the automatic gap check
-    (once, on the first turn after ``gapcheck_epoch``, when a draft exists) and the
-    policy-aware continue message. With neither enabled it reproduces react's default."""
-    policy = policy_aware_continue(policy_epoch, clock=clock) if policy_epoch else None
+    (once, on the first turn after ``gapcheck_epoch``, when a draft exists), the digest of a
+    background sweep (once, on the first turn after it finishes), and the policy-aware
+    continue message. With none enabled it reproduces react's default."""
+    policy = policy_aware_continue(policy_epoch, clock=clock, hint=hint) if policy_epoch else None
 
     async def on_continue(state: AgentState) -> bool | str:
+        if crew is not None:
+            digest = take_background_digest(crew)
+            if digest is not None:
+                return digest
         if gapcheck_epoch is not None and not record.get("done") and clock() >= gapcheck_epoch:
             message, meta = await (runner or auto_gapcheck)()
             record["attempts"] = record.get("attempts", 0) + 1
@@ -420,9 +433,10 @@ def _terminal_refusal(agent_state: AgentState) -> bool:
 
 
 def _minimum_runtime_continuation(
-    *, elapsed_seconds: float, minimum_runtime_seconds: int, remaining_seconds: int
+    *, elapsed_seconds: float, minimum_runtime_seconds: int, remaining_seconds: int, hint: str = ""
 ) -> str:
-    """Return the visible continuation request for a normal early completion."""
+    """Return the visible continuation request for a normal early completion. ``hint``
+    (empty without investigation tools) names the arm's tools for widening the search."""
     return (
         "The evaluation enforces a minimum investigation time before it will "
         "accept completion. You have worked for about "
@@ -430,8 +444,9 @@ def _minimum_runtime_continuation(
         f"is {minimum_runtime_seconds} seconds, with about {remaining_seconds} "
         "seconds remaining in the total budget. Continue meaningful investigation "
         "now: verify evidence, look for counterevidence, and improve report.md. "
-        "Do not idle or merely restate your conclusion. "
-        "Keep report.md in place: edit it, never delete, move, or "
+        "Do not idle or merely restate your conclusion."
+        + hint
+        + " Keep report.md in place: edit it, never delete, move, or "
         "truncate it. If report.md is missing at the deadline the "
         "trial scores zero."
     )
@@ -520,6 +535,7 @@ def inspect_native_agent(
     investigation_tools: Sequence[str] = (),
     policy_aware_continue_enabled: bool = False,
     gapcheck_at: float | None = None,
+    sweep_at_start: bool = False,
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -534,6 +550,8 @@ def inspect_native_agent(
     """
     if gapcheck_at is not None and ("atlas" not in investigation_tools or not 0 < gapcheck_at < 1):
         raise ValueError("gapcheck_at needs tools=atlas and a budget share between 0 and 1")
+    if sweep_at_start and "crew" not in investigation_tools:
+        raise ValueError("sweep_at_start needs tools=atlas,crew")
     if policy_aware_continue_enabled and agent != "react":
         raise ValueError("policy_aware_continue is only wired into agent=react")
     if investigation_tools and agent != "react":
@@ -541,6 +559,7 @@ def inspect_native_agent(
     if not 0 <= min_runtime_fraction < 1:
         raise ValueError("min_runtime_fraction must be between 0 (inclusive) and 1")
     minimum_runtime_seconds = math.ceil(time_limit_seconds * min_runtime_fraction)
+    hint = continue_hint(tuple(investigation_tools))
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         transcript()._log_model_api = True
@@ -569,9 +588,15 @@ def inspect_native_agent(
         )
         gapcheck_record: dict = {}
         extra_tools = []
+        crew = None
         if "atlas" in investigation_tools:
             state.metadata["atlas_install"] = await install_atlas()
             extra_tools.append(atlas_tool())
+        if "crew" in investigation_tools:
+            crew = Crew(deadline_epoch=deadline_epoch)
+            extra_tools.append(crew_tool(crew))
+            if sweep_at_start:
+                start_background_sweep(crew)
         seed_report = (
             seed_reports.get(int(state.metadata.get("parent_epoch", -1)))
             if seed_reports
@@ -597,8 +622,10 @@ def inspect_native_agent(
                     earliest_finish_epoch if policy_aware_continue_enabled else None,
                     started_epoch + int(gapcheck_at * time_limit_seconds) if gapcheck_at else None,
                     gapcheck_record,
+                    crew=crew if sweep_at_start else None,
+                    hint=hint,
                 )
-                if policy_aware_continue_enabled or gapcheck_at
+                if policy_aware_continue_enabled or gapcheck_at or sweep_at_start
                 else None
             ),
             env={
@@ -669,6 +696,7 @@ def inspect_native_agent(
                             elapsed_seconds=elapsed,
                             minimum_runtime_seconds=minimum_runtime_seconds,
                             remaining_seconds=remaining,
+                            hint=hint,
                         )
                     ),
                 ]
@@ -720,6 +748,19 @@ def inspect_native_agent(
             )
             if "atlas" in investigation_tools:
                 state.metadata["atlas_coverage"] = await read_atlas_coverage()
+            if crew is not None:
+                if crew.background is not None and not crew.background.done():
+                    crew.background.cancel()
+                state.metadata["crew"] = crew.stats.metadata()
+                if sweep_at_start:
+                    rec = crew.background_record
+                    state.metadata["crew_sweep_at_start"] = {
+                        **rec,
+                        "finished": bool(crew.background and crew.background.done()
+                                         and not crew.background.cancelled()),
+                        "delivered_share": (round((rec["delivered_epoch"] - started_epoch) / time_limit_seconds, 3)
+                                            if "delivered_epoch" in rec else None),
+                    }
             if gapcheck_at is not None:
                 state.metadata["gapcheck_auto"] = {
                     **gapcheck_record,

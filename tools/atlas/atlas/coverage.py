@@ -3,7 +3,8 @@
 Every command appends one JSON line to ``$ATLAS_STATE`` (default ``~/.atlas/coverage.jsonl``).
 ``opened`` lists units (clusters, themes, windows) whose content was shown; ``seen_rows``
 lists row refs whose text was shown at length; ``listed`` lists units that appeared as a
-one-line entry in some listing (agents often act on those without opening them). ``unseen`` reads it back, and the same file is the
+one-line entry in some listing (agents often act on those without opening them); ``read``
+lists row refs that readers of the reading crew read for the agent. ``unseen`` reads it back, and the same file is the
 per-run process metric (how much of the long tail the agent opened).
 """
 
@@ -19,7 +20,7 @@ def state_path() -> Path:
     return Path(os.environ.get("ATLAS_STATE", Path.home() / ".atlas" / "coverage.jsonl"))
 
 
-def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=()) -> None:
+def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=(), read=()) -> None:
     entry = {
         "t": round(time.time(), 3),
         "cmd": cmd,
@@ -28,6 +29,8 @@ def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=()) -> Non
         "seen_rows": sorted(set(seen_rows)),
         "listed": sorted(set(listed)),
     }
+    if read:
+        entry["read"] = sorted(set(read))
     try:
         p = state_path()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +38,21 @@ def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=()) -> Non
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
+
+
+def load_read() -> set[str]:
+    """Row refs read by readers of the reading crew (not by the agent itself)."""
+    out: set[str] = set()
+    try:
+        with state_path().open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    out.update(json.loads(line).get("read", ()))
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+    except OSError:
+        pass
+    return out
 
 
 def load_dismissed() -> set[str]:

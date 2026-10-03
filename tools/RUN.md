@@ -177,3 +177,150 @@ Run both at the same time. Compare with each other, with pilot 5 (atlas
 before the gap checker) and baseline 5. Look at all four scores, the
 per-finding split (missed / partial / full), and whether Fix items get
 corrected (rerun `atlas gapcheck` on the final reports).
+
+## 7. 30-minute pair: full atlas vs baseline, 2 epochs each
+
+Tests whether a longer budget leaves room for depth: more drilling into what
+atlas surfaces, and time to act on gap-check items. The atlas arm is the full
+current tool (atlas, the `gapcheck` prompt sentence, and the automatic gap
+check at 60%, which is minute 18). The baseline is the published condition
+plus `policy_aware_continue`, as before.
+
+`--time-limit 3600`: the sample limit covers the agent's 30 minutes and
+scoring, and Inspect gives scoring half of it, so 60 min leaves 30 for the 8
+sequential sheets and enough headroom for the agent's 30. Run both at the same
+time.
+
+Atlas, full:
+
+```sh
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T tools=atlas -T time_limit_minutes=30 -T policy_aware_continue=true \
+  -T gapcheck_at=0.6 \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 3600 --epochs 2 --max-samples 2 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/atlas-30min
+```
+
+Baseline:
+
+```sh
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T time_limit_minutes=30 -T policy_aware_continue=true \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 3600 --epochs 2 --max-samples 2 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/baseline-30min
+```
+
+Read them as in section 4 (`usage_metrics.py` on each log dir). With 2 epochs
+per arm this shows direction, not significance. Compare the four scores, the
+per-finding split, report words and calls per run against the 10-minute pair
+(pilot 5 / baseline 5), and the `gapcheck_auto` metadata (did Fix items go
+away; which Consider items were taken up).
+
+## 8. Reading crew (`crew brief`, `crew ask`, `crew sweep`)
+
+**Reader check (a few cents).** Before any pilot, look at real reader output:
+are notes specific, do quotes verify, how long does a call take. Run it on
+all three corpora. Pick theme ids from `atlas overview` for each corpus.
+
+```sh
+uv run python tools/crew_check.py --data data/verbatim t1 t5 grep:proxy \
+  --model openrouter/z-ai/glm-5.3 --provider wafer
+uv run python tools/crew_check.py --data data/mythos5 w3 w10 \
+  --model openrouter/z-ai/glm-5.3 --provider wafer
+uv run python tools/crew_check.py --data data/rubyhack t1 \
+  --model openrouter/z-ai/glm-5.3 --provider wafer
+```
+
+`ask` instead of `brief`:
+
+```sh
+uv run python tools/crew_check.py --data data/verbatim grep:proxy \
+  --ask "Which proxy or relay services did agents use, and do any records report whether they worked?" \
+  --model openrouter/z-ai/glm-5.3 --provider wafer
+```
+
+`sweep` (the corpus's most informative records, no target):
+
+```sh
+for d in verbatim mythos5 rubyhack; do
+  uv run python tools/crew_check.py --data data/$d sweep --model openrouter/z-ai/glm-5.3 --provider wafer
+done
+```
+
+**atlas,crew only (10 minutes, 3 epochs).** Compare against earlier atlas runs
+rather than a new atlas arm (see the caveat below):
+
+```sh
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T tools=atlas,crew -T time_limit_minutes=10 -T policy_aware_continue=true \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 2400 --epochs 3 --max-samples 3 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/crew-pilot
+```
+
+Caveat: the closest earlier atlas arm is pilot 5 (`logs/atlas-pilot5`), which
+predates the gap-check sentence in the atlas prompt, and it ran on a
+different day (provider speed varies). A difference is then crew plus that
+sentence plus day-to-day noise.
+
+**atlas,crew, 30 minutes (matches `logs/atlas-30min`: gapcheck at 60%, 2 epochs),
+with the background sweep:**
+
+```sh
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T tools=atlas,crew -T time_limit_minutes=30 -T policy_aware_continue=true \
+  -T gapcheck_at=0.6 -T sweep_at_start=true \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 3600 --epochs 2 --max-samples 2 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/crew-30min
+```
+
+Since step 17, tool arms also get an exploration hint in the early-finish
+messages, so this arm differs from `atlas-30min` by the crew, the background
+sweep and that hint.
+
+**Pilot (after the reader check).** The arms differ only by `,crew`. Run
+them at the same time. Readers use the agent's model unless you add
+`--model-role reader=...` (record it if you do). Reader tokens are in each
+sample's `crew` metadata and are also billed as normal model usage.
+
+```sh
+for arm in atlas atlas,crew; do
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T tools=$arm -T time_limit_minutes=10 -T policy_aware_continue=true \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 2400 --epochs 3 --max-samples 3 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/crew-pilot-${arm/,/-} &
+done; wait
+```
+
+A third arm adds the background sweep at the start (`-T sweep_at_start=true`
+with `tools=atlas,crew`): the digest arrives on the first turn after it
+finishes. Its timing is in `crew_sweep_at_start`.
+
+```sh
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T tools=atlas,crew -T sweep_at_start=true -T time_limit_minutes=10 \
+  -T policy_aware_continue=true \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 2400 --epochs 3 --max-samples 3 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/crew-pilot-sweep
+```
+
+Read the results with `usage_metrics.py` as in section 4. It also prints the
+crew calls, reader tokens, the share of quotes that verified, and rows read by
+readers.

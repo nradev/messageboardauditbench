@@ -84,7 +84,11 @@ from messageboard_audit_bench.incidents import (
     incident,
     incident_for_variant,
 )
-from messageboard_audit_bench.investigation_tools import parse_tools, prompt_addendum
+from messageboard_audit_bench.investigation_tools import (
+    continue_hint,
+    parse_tools,
+    prompt_addendum,
+)
 from messageboard_audit_bench.native import inspect_native_agent
 from messageboard_audit_bench.report_length import (
     acceptance_limits,
@@ -297,6 +301,7 @@ def _audit_task(
     tools: str | None = None,
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
+    sweep_at_start: bool = False,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -336,6 +341,8 @@ def _audit_task(
         raise ValueError("tools= is only supported with agent=react and backend=inspect")
     if gapcheck_at is not None and ("atlas" not in investigation_tools or not 0 < float(gapcheck_at) < 1):
         raise ValueError("gapcheck_at needs tools=atlas and a budget share between 0 and 1 (e.g. 0.6)")
+    if sweep_at_start and "crew" not in investigation_tools:
+        raise ValueError("sweep_at_start needs tools=atlas,crew")
     if policy_aware_continue and (agent != "react" or backend != "inspect"):
         raise ValueError("policy_aware_continue is only supported with agent=react and backend=inspect")
     budget_min = _time_limit(time_limit_minutes, int(cfg["budget_min"]))
@@ -373,9 +380,12 @@ def _audit_task(
         sample_metadata["policy_aware_continue"] = True
     if gapcheck_at is not None:
         sample_metadata["gapcheck_at"] = float(gapcheck_at)
+    if sweep_at_start:
+        sample_metadata["sweep_at_start"] = True
     if investigation_tools:
         sample_metadata["investigation_tools"] = list(investigation_tools)
         sample_metadata["investigation_tools_prompt"] = prompt_addendum(investigation_tools)
+        sample_metadata["investigation_tools_continue_hint"] = continue_hint(investigation_tools)
     if subscription_model is not None:
         sample_metadata["subscription_model"] = subscription_model
     sample = Sample(
@@ -397,6 +407,7 @@ def _audit_task(
             investigation_tools=investigation_tools,
             policy_aware_continue_enabled=policy_aware_continue,
             gapcheck_at=float(gapcheck_at) if gapcheck_at is not None else None,
+            sweep_at_start=bool(sweep_at_start),
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -476,6 +487,7 @@ def _german_wiki_report(
     tools: str | None = None,
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
+    sweep_at_start: bool = False,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -503,8 +515,11 @@ def _german_wiki_report(
         version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``10.0``). The task
             refuses to run if this checkout is a different version; use
             ``scripts/run_eval.py --version`` to run another one.
-        tools: Comma-separated investigation tools for ``agent=react`` (currently
-            ``atlas``; see ``tools/``). Default none, which is the published condition.
+        tools: Comma-separated investigation tools for ``agent=react``: ``atlas``, and
+            ``crew`` (the reading crew, which needs atlas: ``tools=atlas,crew``); see
+            ``tools/``. Default none, which is the published condition. The crew's readers
+            use the ``reader`` model role if given (``--model-role reader=...``), else the
+            agent's model.
         policy_aware_continue: For ``agent=react``: before the earliest acceptable
             finish, replace Inspect's "call submit()" continue nudge with one that does
             not invite submitting, and accept the report (flagging
@@ -514,6 +529,9 @@ def _german_wiki_report(
             on the first agent turn after this share of the budget (e.g. ``0.6``), and send
             its output with the "corrections first; Consider items optional" framing.
             Default off.
+        sweep_at_start: With ``tools=atlas,crew``: start a ``crew sweep`` in the background
+            when the agent starts, and hand its digest to the agent (framed as leads to
+            confirm) on the first turn after it finishes. Default off.
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -532,6 +550,7 @@ def _german_wiki_report(
         tools=tools,
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,
+        sweep_at_start=sweep_at_start,
     )
 
 
@@ -573,6 +592,7 @@ def _transluce_report(
     tools: str | None = None,
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
+    sweep_at_start: bool = False,
 ) -> Task:
     """Run one sandboxed Transluce report trial on the pinned urlquery.net snapshot.
 
@@ -606,6 +626,7 @@ def _transluce_report(
         tools=tools,
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,
+        sweep_at_start=sweep_at_start,
         scorers=[
             finding_scorer(judge=judge, effort=judge_effort, article_context=article_context),
             process_metrics(),
