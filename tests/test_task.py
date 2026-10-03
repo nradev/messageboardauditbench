@@ -17,7 +17,7 @@ from messageboard_audit_bench.task import german_wiki_report as build_task
 def test_task_has_stable_sample_and_version() -> None:
     task = build_task(agent="codex", config="blind")
 
-    assert task.version == EVAL_VERSION == "10.0"
+    assert task.version == EVAL_VERSION == "12.0"
     assert len(task.dataset) == 1
     assert task.dataset[0].id == "codex:inspect:blind:20m"
     assert task.dataset[0].metadata == {
@@ -231,15 +231,22 @@ def test_config_error_lists_names() -> None:
 def test_all_public_configs_build(config_name: str) -> None:
     cfg = _load_config(config_name)
 
-    expected_prompt = "context" if config_name == "context" else "blind-v2"
+    expected_prompt = {"context": "context", "blind-tokens": "blind-v2-tokens"}.get(
+        config_name, "blind-v2"
+    )
     assert cfg["prompt"] == expected_prompt
     assert (repo_root() / "sandbox" / "prompts" / f"{cfg['prompt']}.txt").is_file()
     assert cfg["data_variant"] in {
         "raw_stripped", "verbatim", "verbatim_anthropic", "mythos5", "rubyhack"
     }
-    assert build_task(config=config_name).dataset[0].id.endswith(
-        f":{config_name}:{cfg['budget_min']}m"
-    )
+    if "budget_tokens" in cfg:
+        assert build_task(agent="react", config=config_name).dataset[0].id.endswith(
+            f":{config_name}:{cfg['budget_tokens']}tok"
+        )
+    else:
+        assert build_task(config=config_name).dataset[0].id.endswith(
+            f":{config_name}:{cfg['budget_min']}m"
+        )
 
 
 def test_inspect_entry_point_exposes_namespaced_task() -> None:
@@ -272,7 +279,7 @@ def test_old_task_names_remain_aliases_of_the_renamed_tasks() -> None:
 
 
 def test_draft_incidents_are_not_german_wiki_conditions() -> None:
-    assert set(_CONFIGS) == {"blind", "context", "blind-anthropic"}
+    assert set(_CONFIGS) == {"blind", "context", "blind-anthropic", "blind-tokens"}
     for draft in ("mythos5", "rubyhack"):
         with pytest.raises(ValueError, match="draft incident"):
             build_task(config=draft)
@@ -281,11 +288,36 @@ def test_draft_incidents_are_not_german_wiki_conditions() -> None:
     assert task_module.incident_task("mythos5").dataset[0].metadata["incident"] == "mythos5"
 
 
-@pytest.mark.parametrize("requested", [None, "10.0", "10", "v10.0", "10-A"])
+@pytest.mark.parametrize("requested", [None, "12.0", "12", "v12.0", "12-A"])
 def test_version_guard_accepts_this_version_in_any_spelling(requested) -> None:
-    assert build_task(agent="codex", version=requested).version == "10.0"
+    assert build_task(agent="codex", version=requested).version == "12.0"
 
 
 def test_version_guard_points_to_the_launcher_for_another_version() -> None:
     with pytest.raises(ValueError, match=r"run_eval.py german-wiki-report --version 9.0"):
         build_task(version="9-A")
+
+
+def test_token_budget_config_renders_tokens_and_records_budget() -> None:
+    task = build_task(agent="react", config="blind-tokens", token_budget=75000)
+    sample = task.dataset[0]
+
+    assert sample.id == "react:inspect:blind-tokens:75000tok"
+    assert "you have 75,000 output tokens" in sample.input
+    assert "minutes" not in sample.input
+    assert "{{" not in sample.input
+    assert "at least 75% of the 75,000-output-token budget" in sample.input
+    assert sample.metadata["budget_min"] is None
+    assert sample.metadata["budget_tokens"] == 75000
+    assert sample.metadata["wall_clock_limit_min"] == 240
+    assert sample.metadata["minimum_runtime_seconds"] == 0
+    assert task.metadata["budget_tokens"] == 75000
+
+
+def test_token_budget_needs_native_react_and_a_token_config() -> None:
+    with pytest.raises(ValueError, match="agent='react' and backend='inspect'"):
+        build_task(agent="codex", config="blind-tokens")
+    with pytest.raises(ValueError, match="has a time budget"):
+        build_task(agent="react", config="blind", token_budget=25000)
+    with pytest.raises(ValueError, match="positive integer"):
+        build_task(agent="react", config="blind-tokens", token_budget=0)

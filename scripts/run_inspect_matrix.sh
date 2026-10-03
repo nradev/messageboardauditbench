@@ -10,7 +10,7 @@ Usage: scripts/run_inspect_matrix.sh [options]
 
 Required:
   --agent AGENT                 claude, codex, or react
-  --config CONFIG               blind or context
+  --config CONFIG               blind, context, blind-anthropic or blind-tokens
 
 Backend/model:
   --backend BACKEND             inspect (default) or subscription
@@ -18,10 +18,12 @@ Backend/model:
   --subscription-model MODEL    CLI model for backend=subscription
 
 Run shape:
-  --time-limit-minutes N        agent budget (default: 20)
+  --time-limit-minutes N        agent budget (default: 20); with --token-budget, only the
+                                wall-clock backstop (default: the config's, 240 for blind-tokens)
+  --token-budget N              output-token budget for a token config (react only)
   --min-runtime-fraction F      minimum fraction before completion (default: 0.75; 0 disables)
   --epochs N                    independent replicates (default: 1)
-  --judge MODEL                 grader model (default: openai/gpt-5.6-sol)
+  --judge MODEL                 grader model (default: anthropic/claude-opus-5-5)
   --logs DIR                    Inspect log directory (default: logs)
 
 Operational limits (all explicit in the resulting command):
@@ -46,10 +48,11 @@ agent=""
 config=""
 model=""
 subscription_model=""
-time_limit_minutes=20
+time_limit_minutes=""
+token_budget=""
 min_runtime_fraction=0.75
 epochs=1
-judge="openai/gpt-5.6-sol"
+judge="anthropic/claude-opus-5-5"
 logs=logs
 max_samples=1
 max_sandboxes=1
@@ -65,7 +68,7 @@ extra=()
 while (($#)); do
   case "$1" in
     --help|-h) usage; exit 0 ;;
-    --backend|--agent|--config|--model|--subscription-model|--time-limit-minutes|--min-runtime-fraction|--epochs|--judge|--logs|--max-samples|--max-sandboxes|--max-connections|--max-retries|--request-timeout|--attempt-timeout|--retry-on-error)
+    --backend|--agent|--config|--model|--subscription-model|--time-limit-minutes|--token-budget|--min-runtime-fraction|--epochs|--judge|--logs|--max-samples|--max-sandboxes|--max-connections|--max-retries|--request-timeout|--attempt-timeout|--retry-on-error)
       (($# >= 2)) || { echo "missing value for $1" >&2; exit 2; }
       key=${1#--}; key=${key//-/_}; printf -v "$key" '%s' "$2"; shift 2 ;;
     --no-log-model-api) echo "raw model API logging is mandatory for native telemetry" >&2; exit 2 ;;
@@ -77,6 +80,9 @@ while (($#)); do
 done
 
 [[ -n "$agent" && -n "$config" ]] || { echo "--agent and --config are required" >&2; exit 2; }
+# A time-budget run keeps its explicit 20-minute default; a token-budget run
+# leaves the wall-clock backstop to the config unless one is given.
+[[ -n "$token_budget" || -n "$time_limit_minutes" ]] || time_limit_minutes=20
 case "$backend" in inspect|subscription) ;; *) echo "invalid --backend: $backend" >&2; exit 2;; esac
 if [[ "$backend" == inspect ]]; then
   [[ -n "$model" ]] || { echo "--model is required for backend=inspect" >&2; exit 2; }
@@ -98,11 +104,13 @@ uv_cmd=(uv run)
 [[ ! -f .env ]] || uv_cmd+=(--env-file .env)
 cmd=("${uv_cmd[@]}" inspect eval messageboard_audit_bench/german_wiki_report
   -T "backend=$backend" -T "agent=$agent" -T "config=$config"
-  -T "time_limit_minutes=$time_limit_minutes" -T "min_runtime_fraction=$min_runtime_fraction" -T "judge=$judge"
+  -T "min_runtime_fraction=$min_runtime_fraction" -T "judge=$judge"
   --epochs "$epochs" --max-samples "$max_samples" --max-sandboxes "$max_sandboxes"
   --max-connections "$max_connections" --max-retries "$max_retries"
   --timeout "$request_timeout" --attempt-timeout "$attempt_timeout"
   --retry-on-error="$retry_on_error" --log-dir "$logs")
+[[ -z "$time_limit_minutes" ]] || cmd+=(-T "time_limit_minutes=$time_limit_minutes")
+[[ -z "$token_budget" ]] || cmd+=(-T "token_budget=$token_budget")
 if [[ "$backend" == inspect ]]; then
   cmd+=(--model "$model")
 else

@@ -16,13 +16,16 @@ set -euo pipefail
 if command -v sha256sum >/dev/null 2>&1; then SHA256SUM=sha256sum; else SHA256SUM="shasum -a 256"; fi
 cd "$(dirname "$0")/.."
 SUMS=data/SHA256SUMS.variants
+# Run under the project environment: build_incident_data.py imports the package,
+# which needs inspect_ai, so a bare system python3 fails.
+PY="uv run --frozen python"
 
 if [ "${1:-}" != "--verify" ]; then
   [ -f data/raw/revisions.jsonl ] || scripts/fetch_data.sh
-  python3 scripts/strip_analysis_fields.py data/raw data/raw_stripped
-  python3 scripts/fill_verbatim.py data/raw_stripped data/verbatim benchmark/human_report.txt
-  python3 scripts/swap_provider.py data/verbatim data/verbatim_anthropic
-  python3 scripts/build_incident_data.py
+  $PY scripts/strip_analysis_fields.py data/raw data/raw_stripped
+  $PY scripts/fill_verbatim.py data/raw_stripped data/verbatim benchmark/human_report.txt
+  $PY scripts/swap_provider.py data/verbatim data/verbatim_anthropic
+  $PY scripts/build_incident_data.py
 fi
 
 if [ -f "$SUMS" ]; then

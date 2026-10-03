@@ -23,6 +23,8 @@ fi
 # Shared, gitignored state lives in the primary checkout only. data/ itself is tracked (checksums,
 # .gitkeep files), so the built variants are linked underneath it: whole directories where the
 # directory is ignored, file by file where only the contents are (raw_stripped, verbatim, verbatim_anthropic).
+# Sync first: listing the data variants imports the package, which needs inspect_ai.
+(cd "$WT" && uv sync --quiet 2>/dev/null) || echo "uv sync failed in $WT; run it by hand" >&2
 link() { [ -e "$1" ] && [ ! -e "$2" ] && ln -s "$1" "$2" || true; }
 for p in runs logs .env data/raw data/augmented data/transluce data/urlquery; do link "$ROOT/$p" "$WT/$p"; done
 while IFS= read -r v; do
@@ -34,7 +36,6 @@ while IFS= read -r v; do
       [ -e "$f" ] && link "$f" "$WT/data/$v/$(basename "$f")"
     done
   fi
-done < <(cd "$WT" && python3 -c \
+done < <(cd "$WT" && uv run --frozen python -c \
   'from messageboard_audit_bench.incidents import data_variants; print(*sorted(data_variants()), sep="\n")')
-(cd "$WT" && uv sync --quiet 2>/dev/null) || echo "uv sync failed in $WT; run it by hand" >&2
 echo "$WT"
