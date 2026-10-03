@@ -57,6 +57,7 @@ def _german_wiki_report_grade(
     rubric: str = "v2",
     judge: str = "anthropic/claude-opus-5-5",
     variant: str | None = None,
+    judge_effort: str | None = None,
 ) -> Task:
     """Grade every staged report in `dir` against `rubric`.
 
@@ -68,6 +69,9 @@ def _german_wiki_report_grade(
         reports otherwise select their variant from data_variant per sample.
       judge: Inspect model used to grade. As on the audit task, a ``grader``
         model role supplied to Inspect takes precedence over this value.
+      judge_effort: the judge's starting reasoning effort: ``xhigh`` (default, as
+        published), ``high``, ``medium`` or ``low``. Lower is faster and cheaper but
+        scores differently; compare only grades made at the same effort.
     """
     folder = staged_dir(dir)
     core.require_original_benchmark_folder(folder)
@@ -99,7 +103,7 @@ def _german_wiki_report_grade(
     return Task(
         dataset=samples,
         solver=report_from_sample(),
-        scorer=sheet_scorer(rubric=rubric, judge=judge, variant=variant),
+        scorer=sheet_scorer(rubric=rubric, judge=judge, variant=variant, effort=judge_effort),
         model="mockllm/model",
         metadata={
             "benchmark": "German wiki report",
@@ -107,6 +111,7 @@ def _german_wiki_report_grade(
             "mode": "grading",
             "rubric": rubric,
             "judge": judge,
+            "judge_effort": judge_effort or "xhigh",
             "staged_dir": folder.name,
         },
     )

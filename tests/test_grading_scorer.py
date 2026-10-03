@@ -62,6 +62,29 @@ def judge(replies: list[str]):
     return get_model("mockllm/model", custom_outputs=nxt)
 
 
+def judge_by_sheet(mode: str, replies: dict[str, list[str]]):
+    """A mock judge that answers each sheet from its own reply list, in order.
+
+    Sheets are graded concurrently, so replies cannot be handed out by call order: each
+    prompt is matched to its sheet by the sheet's first claim heading.
+    """
+    sets, _ = core.load_sheets(mode)
+    queues = {spec["rubric_id"]: iter(replies[spec["rubric_id"]]) for spec in sets}
+    last = {rid: r[-1] for rid, r in replies.items()}
+    markers = {spec["rubric_id"]: f"## {spec['claims'][0]['id']}" for spec in sets}
+
+    def nxt(messages, *_args, **_kwargs) -> ModelOutput:
+        text = "\n".join(m.text for m in messages)
+        rid = next(r for r, marker in markers.items() if marker in text)
+        try:
+            last[rid] = next(queues[rid])
+        except StopIteration:
+            pass
+        return ModelOutput(model="mockllm/model", completion=last[rid], usage=ModelUsage())
+
+    return get_model("mockllm/model", custom_outputs=nxt)
+
+
 def sheet_reply(mode: str, index: int, score: float) -> str:
     """A well-formed reply giving every claim on sheet `index` the same score."""
     sets, _ = core.load_sheets(mode)
@@ -116,9 +139,11 @@ async def test_unparseable_reply_is_retried_then_recorded_as_a_sheet_failure() -
 
 async def test_one_bad_sheet_does_not_discard_the_others() -> None:
     sets, _ = core.load_sheets("v2")
-    replies = ["still not json", "also not json"]  # V1 fails: one try plus the retry
-    replies += [sheet_reply("v2", i, 0.9) for i in range(1, len(sets))]
-    score = await sheet_scorer(rubric="v2", judge=judge(replies))(state(), Target(""))
+    replies = {spec["rubric_id"]: [sheet_reply("v2", i, 0.9)] for i, spec in enumerate(sets)}
+    replies["V1"] = ["still not json", "also not json"]  # V1 fails: one try plus the retry
+    score = await sheet_scorer(rubric="v2", judge=judge_by_sheet("v2", replies))(
+        state(), Target("")
+    )
 
     grade = score.metadata["grade"]
     assert list(score.metadata["failures"]) == ["V1"]
@@ -175,3 +200,36 @@ async def test_exported_grade_matches_what_the_standalone_grader_would_write(
 def test_unknown_rubric_fails_at_construction() -> None:
     with pytest.raises(ValueError, match="unknown rubric"):
         sheet_scorer(rubric="not-a-rubric")
+
+
+async def test_sheets_are_graded_concurrently_and_combined_in_sheet_order() -> None:
+    sets, _ = core.load_sheets("v2")
+    replies = {spec["rubric_id"]: [sheet_reply("v2", i, 0.5)] for i, spec in enumerate(sets)}
+    score = await sheet_scorer(rubric="v2", judge=judge_by_sheet("v2", replies))(
+        state(), Target("")
+    )
+
+    grade = score.metadata["grade"]
+    assert list(grade["per_rubric"]) == [spec["rubric_id"] for spec in sets]
+    assert grade["max"] == 38 and grade["accuracy"] == 0.5
+
+
+def test_judge_effort_ladder() -> None:
+    from messageboard_audit_bench.grading.scorer import EFFORTS, effort_ladder
+
+    assert effort_ladder() == EFFORTS == ("xhigh", "high", "medium")
+    assert effort_ladder("medium") == ("medium",)
+    assert effort_ladder("high") == ("high", "medium")
+    assert effort_ladder("low") == ("low",)
+    with pytest.raises(ValueError):
+        effort_ladder("max")
+
+
+async def test_judge_effort_is_recorded_per_sheet() -> None:
+    sets, _ = core.load_sheets("v2")
+    replies = {spec["rubric_id"]: [sheet_reply("v2", i, 1.0)] for i, spec in enumerate(sets)}
+    score = await sheet_scorer(
+        rubric="v2", judge=judge_by_sheet("v2", replies), effort="medium"
+    )(state(), Target(""))
+
+    assert {r["effort"] for r in score.metadata["grade"]["per_rubric"].values()} == {"medium"}

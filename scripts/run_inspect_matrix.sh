@@ -24,6 +24,7 @@ Run shape:
   --min-runtime-fraction F      minimum fraction before completion (default: 0.75; 0 disables)
   --epochs N                    independent replicates (default: 1)
   --judge MODEL                 grader model (default: anthropic/claude-opus-5-5)
+  --judge-effort E              grader starting effort: xhigh (default), high, medium, low
   --logs DIR                    Inspect log directory (default: logs)
 
 Operational limits (all explicit in the resulting command):
@@ -50,6 +51,7 @@ model=""
 subscription_model=""
 time_limit_minutes=""
 token_budget=""
+judge_effort=""
 min_runtime_fraction=0.75
 epochs=1
 judge="anthropic/claude-opus-5-5"
@@ -68,7 +70,7 @@ extra=()
 while (($#)); do
   case "$1" in
     --help|-h) usage; exit 0 ;;
-    --backend|--agent|--config|--model|--subscription-model|--time-limit-minutes|--token-budget|--min-runtime-fraction|--epochs|--judge|--logs|--max-samples|--max-sandboxes|--max-connections|--max-retries|--request-timeout|--attempt-timeout|--retry-on-error)
+    --backend|--agent|--config|--model|--subscription-model|--time-limit-minutes|--token-budget|--min-runtime-fraction|--epochs|--judge|--judge-effort|--logs|--max-samples|--max-sandboxes|--max-connections|--max-retries|--request-timeout|--attempt-timeout|--retry-on-error)
       (($# >= 2)) || { echo "missing value for $1" >&2; exit 2; }
       key=${1#--}; key=${key//-/_}; printf -v "$key" '%s' "$2"; shift 2 ;;
     --no-log-model-api) echo "raw model API logging is mandatory for native telemetry" >&2; exit 2 ;;
@@ -111,6 +113,7 @@ cmd=("${uv_cmd[@]}" inspect eval messageboard_audit_bench/german_wiki_report
   --retry-on-error="$retry_on_error" --log-dir "$logs")
 [[ -z "$time_limit_minutes" ]] || cmd+=(-T "time_limit_minutes=$time_limit_minutes")
 [[ -z "$token_budget" ]] || cmd+=(-T "token_budget=$token_budget")
+[[ -z "$judge_effort" ]] || cmd+=(-T "judge_effort=$judge_effort")
 if [[ "$backend" == inspect ]]; then
   cmd+=(--model "$model")
 else
