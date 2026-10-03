@@ -17,6 +17,7 @@ from copy import deepcopy
 from functools import wraps
 
 from inspect_ai.agent import Agent, AgentState, react, run
+from inspect_ai.event import ModelEvent
 from inspect_ai.log import transcript
 from inspect_ai.model import (
     ChatMessageAssistant,
@@ -40,6 +41,7 @@ from messageboard_audit_bench.report_length import (
     limits,
     measure,
 )
+from messageboard_audit_bench.token_budget import OutputTokenBudget
 
 REPORT_PATH = "/work/report.md"
 RUNTIME_POLICY_STATE_PATH = "/work/.mbab-runtime-policy.json"
@@ -116,8 +118,10 @@ def _hook_config() -> dict:
     return config
 
 
-def _with_react_feedback(base: Tool, env: dict[str, str]) -> Tool:
-    """Append time and changed report counts after native ReAct tools."""
+def _with_react_feedback(
+    base: Tool, env: dict[str, str], token_budget: OutputTokenBudget | None = None
+) -> Tool:
+    """Append the budget left and changed report counts after native ReAct tools."""
     definition = ToolDef(base)
     last_report: str | None = None
     parameters = deepcopy(definition.parameters)
@@ -135,18 +139,25 @@ def _with_react_feedback(base: Tool, env: dict[str, str]) -> Tool:
         nonlocal last_report
         result = await base(*args, **kwargs)
         await sandbox().exec(["touch", "/tmp/mbab-post-tool-hook-fired"])
-        deadline = int(env["MBAB_DEADLINE_EPOCH"])
-        budget = env["MBAB_BUDGET_MIN"]
-        left = max(0, deadline - int(time.time()))
-        note = (
-            f"Time budget: about {(left + 30) // 60} of {budget} minutes left. "
-            "Keep report.md in place: edit it, never delete, move, or "
-            "truncate it. If report.md is missing at the deadline the "
-            "trial scores zero."
-        )
+        if token_budget is not None:
+            note = (
+                f"{token_budget.note()} Keep report.md in place: edit it, never "
+                "delete, move, or truncate it. If report.md is missing at the end "
+                "the trial scores zero."
+            )
+        else:
+            deadline = int(env["MBAB_DEADLINE_EPOCH"])
+            budget = env["MBAB_BUDGET_MIN"]
+            left = max(0, deadline - int(time.time()))
+            note = (
+                f"Time budget: about {(left + 30) // 60} of {budget} minutes left. "
+                "Keep report.md in place: edit it, never delete, move, or "
+                "truncate it. If report.md is missing at the deadline the "
+                "trial scores zero."
+            )
         earliest = int(env.get("MBAB_EARLIEST_FINISH_EPOCH", "0"))
         now = int(time.time())
-        if earliest > now:
+        if token_budget is None and earliest > now:
             minimum_left = max(1, math.ceil((earliest - now) / 60))
             note += (
                 " Minimum-runtime policy: continue meaningful work for about "
@@ -178,12 +189,16 @@ def inspect_agent(
     claude_disallowed_tools: Sequence[str],
     env: dict[str, str] | None = None,
     codex_features_off: Sequence[str] = (),
+    token_budget: OutputTokenBudget | None = None,
 ) -> Agent:
     """Return the first-class Inspect agent selected by the task.
 
     ``codex_features_off`` names Codex ``[features]`` to disable, as the subscription
-    runner does for URLQuery trials.
+    runner does for URLQuery trials. ``token_budget`` (ReAct only) ends the loop one
+    final turn after the output-token budget is spent.
     """
+    if token_budget is not None and agent != "react":
+        raise ValueError("an output-token budget is only supported for the react agent")
     env = env or {}
     if agent == "claude":
         return claude_code(
@@ -209,10 +224,11 @@ def inspect_agent(
         return react(
             name="messageboard_audit_react",
             tools=[
-                _with_react_feedback(bash(), env),
-                _with_react_feedback(text_editor(), env),
+                _with_react_feedback(bash(), env, token_budget),
+                _with_react_feedback(text_editor(), env, token_budget),
             ],
             retry_refusals=REFUSAL_RETRY_LIMIT,
+            on_continue=token_budget.on_continue if token_budget is not None else None,
         )
     raise ValueError(f"unsupported native agent: {agent!r}")
 
@@ -339,6 +355,25 @@ def _usage_metadata(usages: Sequence[ModelUsage]) -> dict[str, int | float | str
     }
 
 
+def _provider_reported_cost(events: Sequence[object]) -> float | None:
+    """Sum the per-call cost the provider returned (OpenRouter's ``usage.cost``).
+
+    Inspect prices calls only for models in its own table, so OpenRouter models
+    such as GLM report no cost there. The raw responses are logged on native runs
+    and carry the billed amount, prompt caching included. ``None`` when no call
+    reported one.
+    """
+    total = None
+    for event in events:
+        if not isinstance(event, ModelEvent) or event.call is None:
+            continue
+        usage = (event.call.response or {}).get("usage")
+        cost = usage.get("cost") if isinstance(usage, dict) else None
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            total = (total or 0.0) + float(cost)
+    return total
+
+
 def _copy_agent_state(state: TaskState, agent_state: AgentState) -> None:
     state.messages = agent_state.messages
     if agent_state.output:
@@ -376,6 +411,21 @@ def _minimum_runtime_continuation(
         "Do not idle or merely restate your conclusion. "
         "Keep report.md in place: edit it, never delete, move, or "
         "truncate it. If report.md is missing at the deadline the "
+        "trial scores zero."
+    )
+
+
+def _minimum_token_continuation(budget: OutputTokenBudget) -> str:
+    """The token-budget counterpart of `_minimum_runtime_continuation`."""
+    return (
+        "The evaluation enforces a minimum investigation budget before it will "
+        f"accept completion. You have used about {budget.used:,} output tokens; "
+        f"the earliest acceptable finish is {budget.minimum:,}, with about "
+        f"{budget.left:,} left in the total budget of {budget.budget:,}. Continue "
+        "meaningful investigation now: verify evidence, look for counterevidence, "
+        "and improve report.md. Do not idle or merely restate your conclusion. "
+        "Keep report.md in place: edit it, never delete, move, or "
+        "truncate it. If report.md is missing at the end the "
         "trial scores zero."
     )
 
@@ -421,7 +471,6 @@ def _record_native_metrics(
         report_chars=len(report),
         turns=len(assistants),
         tool_calls=sum(len(m.tool_calls or []) for m in assistants),
-        cost_usd=state.cost_usage,
         wall_seconds=round(elapsed, 3),
         limit_exceeded=limit_error.type if limit_error else None,
         limit_value=limit_error.limit if limit_error else None,
@@ -440,6 +489,13 @@ def _record_native_metrics(
         post_tool_hook_fired=post_tool_hook_fired,
         stop_hook_fired=stop_hook_fired,
     )
+    provider_cost = _provider_reported_cost(transcript().events)
+    if state.cost_usage:
+        state.metadata.update(cost_usd=state.cost_usage, cost_source="inspect")
+    elif provider_cost is not None:
+        state.metadata.update(cost_usd=round(provider_cost, 6), cost_source="provider")
+    else:
+        state.metadata.update(cost_usd=state.cost_usage, cost_source=None)
     state.metadata.update(
         measure(
             report,
@@ -460,8 +516,14 @@ def inspect_native_agent(
     min_runtime_fraction: float = 0.75,
     seed_reports: dict[int, str] | None = None,
     codex_features_off: Sequence[str] = (),
+    output_token_budget: int | None = None,
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
+
+    ``output_token_budget`` (ReAct only) replaces the time budget: the agent is
+    stopped one final turn after its output tokens reach it, the minimum-runtime
+    policy counts tokens instead of seconds, and ``time_limit_seconds`` is only
+    the wall-clock backstop.
 
     ``seed_reports`` maps a sample's parent epoch (``metadata["parent_epoch"]``)
     to an earlier report placed at ``/work/report.md`` before the agent starts,
@@ -474,7 +536,11 @@ def inspect_native_agent(
     """
     if not 0 <= min_runtime_fraction < 1:
         raise ValueError("min_runtime_fraction must be between 0 (inclusive) and 1")
-    minimum_runtime_seconds = math.ceil(time_limit_seconds * min_runtime_fraction)
+    minimum_runtime_seconds = (
+        0
+        if output_token_budget is not None
+        else math.ceil(time_limit_seconds * min_runtime_fraction)
+    )
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         transcript()._log_model_api = True
@@ -516,10 +582,16 @@ def inspect_native_agent(
             if not seeded.success:
                 raise RuntimeError(f"could not seed {REPORT_PATH}: {seeded.stderr}")
             state.metadata["seed_report_words"] = count_words(seed_report)
+        token_budget = (
+            OutputTokenBudget(output_token_budget, min_runtime_fraction)
+            if output_token_budget is not None
+            else None
+        )
         selected = inspect_agent(
             agent,
             claude_disallowed_tools=claude_disallowed_tools,
             codex_features_off=codex_features_off,
+            token_budget=token_budget,
             env={
                 "MBAB_DEADLINE_EPOCH": str(deadline_epoch),
                 "MBAB_EARLIEST_FINISH_EPOCH": str(earliest_finish_epoch),
@@ -559,17 +631,22 @@ def inspect_native_agent(
             # which keeps the agent session and its cached prompt prefix intact.
             # Refusals and scoped limits are terminal outcomes, not invitations to
             # keep spending the budget.
-            while (
-                limit_error is None
-                and not terminal_refusal
-                and time.monotonic() - started < minimum_runtime_seconds
-            ):
+            def below_minimum() -> bool:
+                if token_budget is not None:
+                    return not token_budget.exhausted and not token_budget.minimum_reached
+                return time.monotonic() - started < minimum_runtime_seconds
+
+            while limit_error is None and not terminal_refusal and below_minimum():
                 if early_stop_resume_attempts >= MAX_EARLY_STOP_CONTINUATIONS:
                     _copy_agent_state(state, agent_state)
                     raise RuntimeError(
                         "minimum-runtime policy violation: agent completed normally "
                         f"{MAX_EARLY_STOP_CONTINUATIONS} times before the required "
-                        f"{minimum_runtime_seconds}-second investigation period"
+                        + (
+                            f"{token_budget.minimum}-output-token investigation budget"
+                            if token_budget is not None
+                            else f"{minimum_runtime_seconds}-second investigation period"
+                        )
                     )
                 elapsed = time.monotonic() - started
                 remaining = max(0, math.ceil(time_limit_seconds - elapsed))
@@ -579,10 +656,14 @@ def inspect_native_agent(
                 continuation_messages = [
                     *agent_state.messages,
                     ChatMessageUser(
-                        content=_minimum_runtime_continuation(
-                            elapsed_seconds=elapsed,
-                            minimum_runtime_seconds=minimum_runtime_seconds,
-                            remaining_seconds=remaining,
+                        content=(
+                            _minimum_token_continuation(token_budget)
+                            if token_budget is not None
+                            else _minimum_runtime_continuation(
+                                elapsed_seconds=elapsed,
+                                minimum_runtime_seconds=minimum_runtime_seconds,
+                                remaining_seconds=remaining,
+                            )
                         )
                     ),
                 ]
@@ -594,7 +675,11 @@ def inspect_native_agent(
                 terminal_refusal = _terminal_refusal(agent_state)
 
             elapsed = time.monotonic() - started
-            minimum_runtime_reached = elapsed >= minimum_runtime_seconds
+            minimum_runtime_reached = (
+                token_budget.minimum_reached
+                if token_budget is not None
+                else elapsed >= minimum_runtime_seconds
+            )
             report, report_read_error = await _read_report()
             report_length_ping_count = 0
 
@@ -603,9 +688,16 @@ def inspect_native_agent(
             # correcting a report above the prompt's strict upper limit.
             revision = _overlong_revision(report, report_max_words)
             remaining = max(0, math.ceil(time_limit_seconds - elapsed))
+            # On a token budget the correction needs budget left: once it is
+            # spent the agent has already had its one final turn.
+            budget_left = (
+                not token_budget.exhausted
+                if token_budget is not None
+                else remaining >= MIN_REVISION_SECONDS
+            )
             if (
                 revision
-                and remaining >= MIN_REVISION_SECONDS
+                and budget_left
                 and limit_error is None
                 and not terminal_refusal
             ):
@@ -630,7 +722,9 @@ def inspect_native_agent(
         finally:
             report, report_read_error = await _read_report()
             minimum_runtime_reached = (
-                time.monotonic() - started >= minimum_runtime_seconds
+                token_budget.minimum_reached
+                if token_budget is not None
+                else time.monotonic() - started >= minimum_runtime_seconds
             )
             if agent != "react":
                 ids = [
@@ -704,6 +798,8 @@ def inspect_native_agent(
                 post_tool_hook_fired=post_tool_hook_fired,
                 stop_hook_fired=stop_hook_fired,
             )
+            if token_budget is not None:
+                state.metadata.update(token_budget.metadata())
             # Lazy import prevents the audit helper from creating a native
             # runtime import cycle. It reads the finalized trajectory only.
             try:

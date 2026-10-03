@@ -131,7 +131,7 @@ call and report-length feedback only when the file is over the strict maximum.
 Inspect ReAct appends the same feedback directly to its tool results. The
 `post_tool_hook_fired` and `stop_hook_fired` metadata fields make this auditable
 in Inspect logs.
-`-T judge=openai/gpt-5.6-sol` picks the default judge;
+`-T judge=<model>` picks the judge (default `anthropic/claude-opus-5-5`);
 an Inspect `grader` model role takes precedence when one is supplied.
 
 ## Run with a subscription CLI

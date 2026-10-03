@@ -23,7 +23,7 @@ from incident_pipeline import validate  # noqa: E402
 
 def test_registry_describes_all_three_incidents() -> None:
     assert tuple(incidents()) == ("wiki", "mythos5", "rubyhack")
-    assert set(config_names()) == {"blind", "context", "blind-anthropic", "mythos5", "rubyhack"}
+    assert set(config_names()) == {"blind", "context", "blind-anthropic", "blind-tokens", "mythos5", "rubyhack"}
     assert data_variants() == {
         "raw_stripped",
         "verbatim",

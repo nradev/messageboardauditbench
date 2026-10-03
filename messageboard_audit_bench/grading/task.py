@@ -55,7 +55,7 @@ def report_from_sample():
 def _german_wiki_report_grade(
     dir: str = "round4_blind120",  # noqa: A002 — the Inspect task parameter is named `dir`
     rubric: str = "v2",
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     variant: str | None = None,
 ) -> Task:
     """Grade every staged report in `dir` against `rubric`.
