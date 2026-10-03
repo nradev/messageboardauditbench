@@ -296,6 +296,7 @@ def _audit_task(
     allow_drafts: bool = False,
     tools: str | None = None,
     policy_aware_continue: bool = False,
+    gapcheck_at: float | None = None,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -333,6 +334,8 @@ def _audit_task(
     investigation_tools = parse_tools(tools)
     if investigation_tools and (agent != "react" or backend != "inspect"):
         raise ValueError("tools= is only supported with agent=react and backend=inspect")
+    if gapcheck_at is not None and ("atlas" not in investigation_tools or not 0 < float(gapcheck_at) < 1):
+        raise ValueError("gapcheck_at needs tools=atlas and a budget share between 0 and 1 (e.g. 0.6)")
     if policy_aware_continue and (agent != "react" or backend != "inspect"):
         raise ValueError("policy_aware_continue is only supported with agent=react and backend=inspect")
     budget_min = _time_limit(time_limit_minutes, int(cfg["budget_min"]))
@@ -368,6 +371,8 @@ def _audit_task(
     }
     if policy_aware_continue:
         sample_metadata["policy_aware_continue"] = True
+    if gapcheck_at is not None:
+        sample_metadata["gapcheck_at"] = float(gapcheck_at)
     if investigation_tools:
         sample_metadata["investigation_tools"] = list(investigation_tools)
         sample_metadata["investigation_tools_prompt"] = prompt_addendum(investigation_tools)
@@ -391,6 +396,7 @@ def _audit_task(
             codex_features_off=URLQUERY_CODEX_FEATURES_OFF if benchmark_id == "urlquery" else (),
             investigation_tools=investigation_tools,
             policy_aware_continue_enabled=policy_aware_continue,
+            gapcheck_at=float(gapcheck_at) if gapcheck_at is not None else None,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -469,6 +475,7 @@ def _german_wiki_report(
     version: str | None = None,
     tools: str | None = None,
     policy_aware_continue: bool = False,
+    gapcheck_at: float | None = None,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -503,6 +510,10 @@ def _german_wiki_report(
             not invite submitting, and accept the report (flagging
             ``minimum_runtime_violation``) instead of failing the sample when the
             early-completion cap is reached. Default off, the published condition.
+        gapcheck_at: With ``tools=atlas``: run ``atlas gapcheck`` on the draft report once,
+            on the first agent turn after this share of the budget (e.g. ``0.6``), and send
+            its output with the "corrections first; Consider items optional" framing.
+            Default off.
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -520,6 +531,7 @@ def _german_wiki_report(
         scorers=_scorers(judge, rubric, variant),
         tools=tools,
         policy_aware_continue=policy_aware_continue,
+        gapcheck_at=gapcheck_at,
     )
 
 
@@ -560,6 +572,7 @@ def _transluce_report(
     version: str | None = None,
     tools: str | None = None,
     policy_aware_continue: bool = False,
+    gapcheck_at: float | None = None,
 ) -> Task:
     """Run one sandboxed Transluce report trial on the pinned urlquery.net snapshot.
 
@@ -592,6 +605,7 @@ def _transluce_report(
         data_variant=None,
         tools=tools,
         policy_aware_continue=policy_aware_continue,
+        gapcheck_at=gapcheck_at,
         scorers=[
             finding_scorer(judge=judge, effort=judge_effort, article_context=article_context),
             process_metrics(),

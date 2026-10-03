@@ -636,3 +636,104 @@ side. Baseline log: `logs/atlas-baseline5/2026-10-03T12-52-26-…dDDi3gPBvxQBWpx
   sizes were similar (~45k tokens). Run the arms simultaneously next time.
 - Cost: similar token totals (input+cache 1.1–1.9M per run on both sides;
   atlas used fewer output tokens, 24k vs 28–34k, with fewer calls).
+
+## Step 12: gap checker G1–G6 (`atlas gapcheck`, `atlas timeline`)
+
+Implemented per the plan in `TOOL_IDEAS.md` (automatic mode G7 not yet).
+Deterministic, in the sandbox, ~2s per check, output ~1.5–2k chars.
+
+- **G1 parser:** `file:line` refs, structured record ids (with `~ @ : /`),
+  cluster/theme ids, quotes (paired straight or curly marks; blockquotes
+  with the attribution dropped), ISO / `MM-DD` / named dates.
+- **G2 Fix checks:** refs out of range; id-shaped tokens that are no record
+  and no value; quotes found verbatim only outside the records cited for
+  them; long quotes (≥6 words) attributed to a specific record and not found
+  anywhere (<50% similar to any text). A reusable quote matcher normalises
+  NFKC, curly/straight quotes, dashes, Markdown escapes, backticks, `*` and
+  case, and treats `…`, `...`, `[...]` as elisions.
+- **G3 timeline:** per file and per category value (≤10 values): first/last
+  activity, peaks (≥3× the median active day and ≥5% of the series), the
+  sharpest 3-day rise and fall, quiet stretches of ≥3 days. Also a command.
+- **G4–G5 Consider checks:** themes with ≥10 actors the report never names;
+  peaks, sharp changes and file-level ends the report never dates (deduped
+  across identical series); files never referenced; dates outside the data;
+  clusters the agent opened that the report does not use; ≥120-word passages
+  with ≤1 citation; near-match, stitched, related-record and common-text
+  quote issues.
+- **G6 output:** Fix first, then Consider phrased as questions with "leaving
+  out immaterial items is correct"; stable `gNNNNNN` ids; `--dismiss`
+  (stored in the coverage log); `--json`.
+
+**Fix precision (the acceptance gate).** First run on one pilot report: 10
+Fix items, almost all false. Each false positive was traced to a generic
+cause and fixed; every Fix item was then checked by hand against the data:
+
+| cause of false Fix items | rule adopted |
+|---|---|
+| closing mark of one quote paired with the opening mark of the next | a quote opens after start/space/bracket and closes before space/punctuation; its text cannot start with punctuation |
+| attribution captured with blockquotes | drop text after ` — ` / ` -- `; lines with their own `"…"` go to the quote matcher |
+| data has backticks/emphasis the agent dropped | strip backticks and `*` on both sides |
+| names that are record ids in a name-keyed file read as citations | only structured ids (with separators) count as citations |
+| scare quotes / own phrases treated as misquotes | "not found" is Fix only with an adjacent citation of a specific record; otherwise Consider |
+| nearest citation belonged to another quote or sentence | citations attach within the same sentence (incl. a quote ending its own sentence), with no other quote between; a citation before a quote only if it introduces it (`` `id` …: "…" ``, no "and"/comma outside its own brackets, not inside an earlier bracket) |
+| citing the page/entity record, quoting its text from another version | same entity (shared non-actor identifier) → Consider "related record" |
+| placeholder phrases quoted with any citation | text in ≥5 distinct entities → Consider "common text" |
+| paraphrase scored against the wrong candidate | near-match also scores the cited record |
+| stitched quotes from different records | Consider "cite each part separately" |
+| quoted term lists ("a, b, c, d") | not treated as quotes |
+
+Results (every Fix item checked by hand):
+
+| report set | reports | Fix items | correct | false |
+|---|---|---|---|---|
+| pilot reports (tuning) | 9 | 2 | 2 | 0 |
+| round-4 reports (tuned on after first pass) | 113 | 4 | 4 | 0 |
+| fu5k + pswap (first fresh set; one false item found and fixed) | 152 | 3 | 3 | 0 |
+| ablation_anthropic (untouched confirmation set) | 31 | 0 | – | 0 |
+
+The correct items are real report errors: two nonexistent event ids; quotes
+attributed to the wrong page (three), including one where the agent cited a
+cluster id `c3366` as a line number; a "label" that is the agent's summary
+rather than the record's text. One of my own early judgements was wrong (a
+quote I first counted as a correct catch was correctly page-cited by the
+agent), which the stricter pairing rules then dropped. Caveat: the
+confirmation set produced no Fix items at all, so it shows absence of false
+positives, not recall; the gate (zero false Fix items on a fixed set checked
+by hand) is met on all sets.
+
+- Generality: on Mythos 5 a planted wrong citation is flagged and the correct
+  one is not; theme items are suppressed there (3 "actors" are roles, so
+  themes are topics, not shared activities), and duplicate end-of-series
+  items were removed. RubyHack (no time field) runs cleanly.
+- Tests: 26 atlas tests (new: Fix items exact on planted errors, ambiguous
+  cases go to Consider, dismissal, timeline).
+- `gapcheck` and `timeline` are listed in the atlas tool description; the
+  prompt is unchanged. Automatic mode (G7) and any prompt mention wait for a
+  decision.
+
+## Step 13: gap checker in the agent loop (prompt sentence, automatic mode G7)
+
+- **Prompt:** the atlas paragraph now ends its workflow with "Before you
+  finalise, run `atlas gapcheck` on your draft: correct every Fix item (a
+  citation or quote the data does not support as written); Consider items
+  are optional, so include one only if it is material to your account."
+  This changes the atlas condition relative to pilot 5.
+- **Automatic mode (`-T gapcheck_at=0.6`, needs `tools=atlas`):** the react
+  `on_continue` hook is now one combined hook (`native.combined_continue`)
+  for the optional behaviours. On the first agent turn after the given share
+  of the budget it runs `atlas gapcheck /work/report.md` in the sandbox; if
+  there is no draft yet it tries again on later turns; once it succeeds it
+  sends one user message that opens with the framing ("Corrections first …
+  Consider items are optional … leaving out immaterial items is correct …
+  `--dismiss`") followed by the checker's output, and never runs again. With
+  neither option enabled the hook is not installed, so default runs are
+  unchanged. Outcome recorded as `gapcheck_auto` (attempts, fix/consider
+  counts, budget share when sent). Shipped after the Fix-precision gate
+  (step 12) passed.
+- Verified: unit tests (no call before the threshold, retry while no draft,
+  exactly one message, option validation, prompt contains the sentence); a
+  scripted mock run in the real sandbox with a planted wrong citation: the
+  message arrived once the draft existed (17.5% of a 2-minute budget with
+  threshold 5%, setup included) and its Fix item named the record that holds
+  the quote. 28 atlas tests pass; ruff clean.
+- `RUN.md` section 6: paired gap-checker pilot (on-demand vs automatic at 60%).

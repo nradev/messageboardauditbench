@@ -9,6 +9,7 @@ use from bash. Its coverage log is read back into sample metadata as a process m
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from pathlib import Path
 
@@ -42,7 +43,10 @@ TOOL_PROMPTS = {
         "periodically and before you finalise your report, to find salient records you have "
         "not looked at yet. For questions about one value or one field (who, when, how "
         "often), use `atlas entities`, `atlas pivot`, `atlas count`, `atlas rows` and "
-        "`atlas join` before writing a script. Plain shell tools remain available for anything atlas does not cover.\n"
+        "`atlas join` before writing a script. Before you finalise, run `atlas gapcheck` on "
+        "your draft: correct every Fix item (a citation or quote the data does not support "
+        "as written); Consider items are optional, so include one only if it is material to "
+        "your account. Plain shell tools remain available for anything atlas does not cover.\n"
     ),
 }
 
@@ -82,6 +86,26 @@ async def install_atlas() -> dict:
     if not warm.success:
         raise RuntimeError(f"atlas index build failed: {warm.stderr[:500]}")
     return {"atlas_sources": sorted(_atlas_sources())}
+
+
+GAPCHECK_FRAMING = (
+    "Automatic check of your draft report.md against the data (atlas gapcheck). Corrections "
+    "first: fix every Fix item below; each is a citation or quote the data does not support "
+    "as written. Consider items are optional: include one only if it is material to your "
+    "account; leaving out immaterial items is correct, and `atlas gapcheck --dismiss gID` sets "
+    "an item aside. Then continue your work.\n\n"
+)
+
+
+async def auto_gapcheck() -> tuple[str | None, dict]:
+    """Run `atlas gapcheck` on the draft report. Returns (message for the agent, metadata),
+    or (None, {...}) when there is no report yet, so the caller can try again later."""
+    result = await sandbox().exec([ATLAS_BIN, "gapcheck", "/work/report.md"], timeout=120)
+    out = (result.stdout or "").strip()
+    m = re.search(r": (\d+) to fix, (\d+) to consider", out.splitlines()[0] if out else "")
+    if not result.success or not m:
+        return None, {"error": (out or result.stderr or "")[:300]}
+    return GAPCHECK_FRAMING + out, {"fix": int(m.group(1)), "consider": int(m.group(2))}
 
 
 async def read_atlas_coverage() -> list[dict]:
@@ -125,6 +149,10 @@ def atlas() -> Tool:
           rows TABLE [--where ...] [--fields a,b] [--sort time|FIELD] [--desc]   matching rows, one
                                          line each with their ids, instead of writing a script
           join A.FIELD B.FIELD [-i]      which values of one field appear in another (overlap, examples)
+          timeline                       when activity starts, ends, peaks, changes level, goes quiet
+          gapcheck [REPORT]              check your report against the data: Fix (citations or quotes
+                                         the data does not support) and Consider (optional coverage
+                                         questions; leave out what is immaterial); --dismiss gID
 
         Refs like logs:120 are 1-based line numbers in the source file, so they stay valid in
         shell and python too; rows also show their own id field, which is best for citing.

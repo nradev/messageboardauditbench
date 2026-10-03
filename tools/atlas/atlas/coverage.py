@@ -37,6 +37,23 @@ def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=()) -> Non
         pass
 
 
+def load_dismissed() -> set[str]:
+    """Gap-checker item ids the agent set aside with `atlas gapcheck --dismiss`."""
+    out: set[str] = set()
+    try:
+        with state_path().open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("cmd") == "gapcheck-dismiss":
+                    out.update(e.get("args", ()))
+    except OSError:
+        pass
+    return out
+
+
 def load() -> tuple[set[str], set[str], set[str]]:
     """(opened unit ids, row refs seen at length, unit ids shown in any listing)."""
     opened: set[str] = set()

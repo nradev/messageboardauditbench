@@ -33,6 +33,7 @@ from inspect_swe import claude_code, codex_cli
 from messageboard_audit_bench.audit import trajectory_metrics
 from messageboard_audit_bench.investigation_tools import atlas as atlas_tool
 from messageboard_audit_bench.investigation_tools import (
+    auto_gapcheck,
     install_atlas,
     read_atlas_coverage,
 )
@@ -199,6 +200,27 @@ def policy_aware_continue(earliest_finish_epoch: int, clock=time.time):
             "look for counterevidence, examine records you have not looked at yet, and "
             "improve report.md. Do not idle or merely restate your conclusion."
         )
+
+    return on_continue
+
+
+def combined_continue(policy_epoch: int | None, gapcheck_epoch: int | None, record: dict,
+                      runner=None, clock=time.time):
+    """One ``react`` on_continue hook for the optional behaviours: the automatic gap check
+    (once, on the first turn after ``gapcheck_epoch``, when a draft exists) and the
+    policy-aware continue message. With neither enabled it reproduces react's default."""
+    policy = policy_aware_continue(policy_epoch, clock=clock) if policy_epoch else None
+
+    async def on_continue(state: AgentState) -> bool | str:
+        if gapcheck_epoch is not None and not record.get("done") and clock() >= gapcheck_epoch:
+            message, meta = await (runner or auto_gapcheck)()
+            record["attempts"] = record.get("attempts", 0) + 1
+            if message is not None:
+                record.update(meta, done=True, at_epoch=int(clock()))
+                return message
+        if policy is not None:
+            return await policy(state)
+        return True
 
     return on_continue
 
@@ -497,6 +519,7 @@ def inspect_native_agent(
     codex_features_off: Sequence[str] = (),
     investigation_tools: Sequence[str] = (),
     policy_aware_continue_enabled: bool = False,
+    gapcheck_at: float | None = None,
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -509,6 +532,8 @@ def inspect_native_agent(
     update throughout the investigation. Unexpected agent or sandbox failures
     still fail the sample normally.
     """
+    if gapcheck_at is not None and ("atlas" not in investigation_tools or not 0 < gapcheck_at < 1):
+        raise ValueError("gapcheck_at needs tools=atlas and a budget share between 0 and 1")
     if policy_aware_continue_enabled and agent != "react":
         raise ValueError("policy_aware_continue is only wired into agent=react")
     if investigation_tools and agent != "react":
@@ -542,6 +567,7 @@ def inspect_native_agent(
             report_min_words,
             report_max_words,
         )
+        gapcheck_record: dict = {}
         extra_tools = []
         if "atlas" in investigation_tools:
             state.metadata["atlas_install"] = await install_atlas()
@@ -567,8 +593,12 @@ def inspect_native_agent(
             codex_features_off=codex_features_off,
             extra_tools=extra_tools,
             on_continue=(
-                policy_aware_continue(earliest_finish_epoch)
-                if policy_aware_continue_enabled
+                combined_continue(
+                    earliest_finish_epoch if policy_aware_continue_enabled else None,
+                    started_epoch + int(gapcheck_at * time_limit_seconds) if gapcheck_at else None,
+                    gapcheck_record,
+                )
+                if policy_aware_continue_enabled or gapcheck_at
                 else None
             ),
             env={
@@ -690,6 +720,14 @@ def inspect_native_agent(
             )
             if "atlas" in investigation_tools:
                 state.metadata["atlas_coverage"] = await read_atlas_coverage()
+            if gapcheck_at is not None:
+                state.metadata["gapcheck_auto"] = {
+                    **gapcheck_record,
+                    "at_share": (
+                        round((gapcheck_record["at_epoch"] - started_epoch) / time_limit_seconds, 3)
+                        if "at_epoch" in gapcheck_record else None
+                    ),
+                }
             if agent != "react":
                 ids = [
                     call.id

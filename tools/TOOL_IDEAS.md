@@ -392,3 +392,195 @@ budget. The benchmark already has 10, 30 and 120 minute data points for that.
 - [OpenRCA (ICLR 2025)](https://iclr.cc/virtual/2025/poster/32093)
 - [ExCyTIn-Bench (arXiv 2507.14201)](https://arxiv.org/pdf/2507.14201)
 - [Failing to Falsify: confirmation bias in LMs (arXiv 2604.02485)](https://arxiv.org/pdf/2604.02485) and [AgentGym2 (arXiv 2607.05174)](https://arxiv.org/pdf/2607.05174)
+
+---
+
+# Plan: gap checker (idea 3), then reading crew (idea 2)
+
+Written after the first paired pilot, but designed from what each tool is for
+in any investigation, not from what one run on one dataset missed. Same rules
+as before: no domain words, generic signals, checked on more than one corpus,
+nothing tuned to known findings or to one model's habits.
+
+## Gap checker (`atlas gapcheck [REPORT]`)
+
+**Purpose.** A report is an argument from evidence. Gaps are mismatches
+between three things: the corpus, what the investigator examined, and what the
+report says. A checker that sees all three can point to each kind of mismatch
+without knowing anything about the domain. It is deterministic (no model
+calls), runs in the sandbox, reads `report.md`, the atlas index and the
+coverage log, and returns a ranked, length-capped checklist. It never edits
+the report.
+
+**Gap types, all generic:**
+
+1. **Evidence gaps (precision).**
+   - Cited refs that do not exist (`file:line` out of range, unknown record or
+     cluster ids).
+   - Quoted text that does not appear verbatim in the cited record, or
+     anywhere in the corpus. Fabricated or paraphrased "quotes" are a common
+     report failure and can be checked exactly.
+   - Paragraphs that make claims with no citation and no specific identifier,
+     number or time.
+2. **Proportionality gaps (corpus → report).** The corpus has structure that a
+   report should either cover or deliberately set aside:
+   - themes ranked by actors/records, entities and actors by activity;
+   - time structure: first and last activity, peaks, sustained changes, gaps
+     (a simple change-point pass over per-day counts per file and per theme);
+   - files and fields never referenced at all.
+   Each item is reported with its share of the corpus and whether the report
+   mentions it (by its distinctive words, identifiers or dates). Ordered by a
+   blend of share of the corpus and importance signals (unusual, isolated
+   from any theme, a change point; see "Materiality" below), so a period
+   holding 40% of activity can be raised, but large routine activity does not
+   crowd out small decisive evidence. This is about proportion, not about
+   adding every item.
+3. **Examination gaps (investigation ↔ report).** From the coverage log:
+   - examined but not reported: themes, clusters and records the agent opened
+     or returned to, whose distinctive words never reach the report;
+   - reported but never examined: entities or claims in the report that no
+     atlas call touched (a cue to verify before keeping them). Bash-only
+     investigation is invisible to the log, so this part is advisory.
+4. **Depth gaps.** Topics given one sentence while the agent spent several
+   calls on them, and conversely long passages resting on one record.
+   Framed as "expand or drop", since the report length is fixed.
+5. **Consistency gaps.** Dates in the report outside the corpus time range;
+   counts stated in the report that atlas can recompute exactly (rows of a
+   field value, distinct values) and that differ.
+
+**Materiality: the checker must not force immaterial content.** A report has
+a fixed length, and agents tend to tick off any checklist they are given, so
+a list of "things you did not mention" invites padding and displaces what
+matters. Rules:
+
+- **Two kinds of output, ordered and worded differently.**
+  - *Fix* (types 1 and 5): problems with what the report already says —
+    citations that point to nothing, quotes not in the cited record or the
+    data, counts and dates the data contradicts. Correcting them never adds
+    topics, and they matter whether a point is central or minor. Shown first.
+  - *Consider* (types 2–4): things the report does not cover or covers
+    unevenly. Whether they belong is a judgment, so they are phrased as
+    questions ("this period holds 40% of activity; is it material to your
+    account?") with an explicit note that leaving out immaterial items is
+    correct. Shown second, so limited time goes to corrections first.
+- **Importance, not just size.** The *Consider* list is short and mixed,
+  ordered by importance signals (unusual, isolated from any theme, a change
+  point) as well as share of the corpus, so large routine activity does not
+  crowd out small decisive evidence.
+- **Dismissal.** `atlas gapcheck --dismiss ID` records that an item was
+  considered and set aside; dismissed items do not reappear.
+- **Fix must be (almost) never wrong.** A false *Consider* flag costs
+  attention; a false *Fix* flag can cost content (an agent told a correct
+  quote is "not in the data" may delete a true citation). So:
+  - matching normalises whitespace, curly/straight quotes, Markdown escapes
+    and case, and treats `…` / `[...]` as elisions;
+  - a *Fix* item states what was found ("not found verbatim in
+    revisions:7141; closest match in revisions:7126"), never "fabricated";
+  - ambiguous cases (near-matches, likely paraphrases) go to *Consider*, not
+    *Fix*;
+  - **acceptance gate:** zero *Fix* false positives, checked by hand, on a
+    fixed set of existing reports, before automatic mode (G7) ships.
+- **Measured.** The evaluation tracks displacement (findings that drop
+  relative to the paired arm) and how report words are spread across topics,
+  not only whether more items get mentioned.
+
+**Steps.**
+- G1 Report parser: refs, record/cluster/theme ids, quoted strings, dates,
+  numbers, entity mentions (matched against the entity index), theme words.
+- G2 Evidence checks (type 1), including a reusable quote verifier: given a
+  quote and an optional ref, find exact or whitespace-normalised matches.
+- G3 Time structure: per-day series per file and theme; start/end, peaks,
+  largest sustained changes, quiet stretches. Generic; also useful on its own
+  as `atlas timeline`.
+- G4 Proportionality and examination checks (types 2–3).
+- G5 Depth and consistency checks (types 4–5).
+- G6 Output: *Fix* section first, then *Consider* (as questions, with the
+  "leaving out immaterial items is correct" note), each ranked and capped
+  (~3k chars total); `--dismiss ID`; `--json`; coverage-log entry.
+- G7 Integration: on demand (`atlas gapcheck`), plus an optional automatic
+  run at a fixed share of the budget (`-T gapcheck_at=0.6`): the harness
+  inserts its output as a message so there is time to act on it. The
+  inserted message keeps the framing, not just the content: it opens with
+  "corrections first; the Consider items are optional, and leaving out
+  immaterial ones is correct". Ships only after the Fix-precision gate
+  passes.
+
+**Validation without tuning to answers.**
+- Unit tests on synthetic corpora and reports with known planted gaps.
+- Run on existing reports (pilot reports, round-4 reports in
+  `benchmark/graded_inputs/`) to check false-positive rates and output length
+  (e.g. how often a correctly cited quote is flagged). Every *Fix* item on a
+  fixed report set is checked by hand; zero false positives is the gate for
+  automatic mode. Grades are not used to
+  choose rules or thresholds; rules are fixed before looking at how they
+  relate to grades.
+- Check on Mythos 5 and RubyHack with a few hand-written reports, since their
+  structure differs (one transcript; package diffs).
+
+**What would show it works.** Fewer unverifiable quotes and citations
+(precision), more findings fully credited rather than partially, a higher
+summary grade, and no displacement (findings dropping relative to the paired
+arm); not necessarily more findings mentioned.
+
+## Reading crew (idea 2)
+
+**Purpose.** An investigator's limiting resource is attention: how many
+records it can read and think about within its turns. Parallel readers can
+read many records outside the agent's turns and return compact, structured,
+cited notes. This serves breadth (reading what the agent would never reach),
+depth (reading everything about one thing the agent found) and directed
+questions, on any corpus.
+
+**Shared design rules.**
+- Host-side Inspect tools (the sandbox has no network), callable by the
+  agent; reader calls run within the run's wall-clock budget and their tokens
+  are recorded in sample metadata.
+- Reader model configurable (`-T reader_model=…`), defaulting to the agent's
+  own model so readers add no outside knowledge or stronger reasoning; a
+  cheaper model is an explicit, recorded choice. Prompts say: only what the
+  given records state.
+- Every claim a reader returns carries a record id and a quote; quotes are
+  verified with the gap checker's quote verifier and unverified ones are
+  dropped or marked. This keeps readers honest and limits leakage of outside
+  knowledge.
+- Hard caps per call (records, tokens) and per run (calls, total tokens).
+- Fixed, generic extraction schema: actors; actions and methods (commands,
+  hosts, paths, mechanisms); claims the authors make; times and sequence;
+  outcomes; anything unexpected; open questions. No domain words.
+- Reading units come from atlas: clusters, themes, windows (for
+  low-redundancy data such as one long transcript), `rows`/`pivot` result
+  sets. Windows matter for generality: on a single narrative, reading in order
+  with a running summary (chain-of-agents style) suits better than clusters.
+
+**Steps.**
+- R1 Reader infrastructure: tool plumbing, model selection, concurrency,
+  caps, cost accounting, quote verification, mock-model tests.
+- R2 `ask "question" [--in SET]`: directed semantic search. Candidates come
+  from an atlas set (theme, cluster, pivot value, `rows` filter, grep hits),
+  capped; readers keep only records that answer the question, each with a
+  quote and id; answers are merged and grouped.
+- R3 `brief SET`: synthesis of one set using the schema (who, what, how, when,
+  claims, outcomes, unexpected, open questions), with citations.
+- R4 `sweep`: unprompted reading of the corpus's most informative units
+  (salient rare records, theme exemplars, windows in order), producing a cited
+  digest. Run once early in the budget, or per theme on demand.
+- R5 (later) Ledger: reader notes and agent findings in one structured file
+  (idea 6), feeding the gap checker and the report.
+
+**Validation.** Mock-model tests for plumbing and caps; small paid checks of
+reader output on all three local corpora (are quotes verbatim, are notes on
+schema, how many records per call fit the caps); then paired runs.
+
+## Evaluation plan for both
+
+- Paired arms run at the same time, same provider and options, ≥3 epochs
+  each (more when affordable): atlas vs atlas + gap checker; then atlas vs
+  atlas + reading crew. A 2×2 (with/without atlas) is the follow-up, since
+  both tools could also help without atlas.
+- Report all four numbers (raw findings, coverage, TL;DR, combined), the
+  distribution of per-finding grades (0 / partial / full), quote verification
+  rates, model calls and cost (agent and readers separately).
+- 10-minute and 30-minute budgets, since both tools trade agent time for
+  quality.
+- Before claiming generality: a held-out corpus (urlquery, or the Mythos 5 /
+  RubyHack drafts with their rubrics) and a second model.

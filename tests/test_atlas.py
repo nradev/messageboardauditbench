@@ -301,3 +301,100 @@ def test_where_supports_numeric_and_ordered_text_comparisons(corpus, capsys):
     assert "14 rows" in out and "posts:81" not in out  # the rare_user row is excluded
     assert cli.main(["count", "posts.user", "--where", "time<2026-01-05", *args]) == 0
     assert "of 81 rows" in capsys.readouterr().out
+
+
+def _gap(corpus, report_text, tmp_path, *extra):
+    rp = tmp_path / "report.md"
+    rp.write_text(report_text)
+    return cli.main(["gapcheck", str(rp), "--json", "--data", str(corpus), *extra])
+
+
+def test_gapcheck_fix_items_are_exact(corpus, tmp_path, capsys):
+    report = (
+        "# Report\n\n"
+        'The odd post says "editing /etc/hosts to point a host name at 10.0.0.5" (posts:81).\n\n'
+        'Misattributed: "editing /etc/hosts to point a host name at 10.0.0.5" (posts:5).\n\n'
+        "A ref that does not exist: posts:999.\n\n"
+        'Invented: "the operator ordered every agent to stop at once" (posts:3).\n\n'
+        'Fine with typography: “Status report for the nightly batch job… wrote the summary” (posts:1).\n\n'
+        'Term list, not a quote: "alpha, bravo, charlie, delta" (posts:2).\n'
+    )
+    assert _gap(corpus, report, tmp_path) == 0
+    out = json.loads(capsys.readouterr().out)
+    fixes = [i["text"] for i in out["fix"]]
+    assert any("posts:999 does not exist" in t for t in fixes)
+    assert any("not in the cited posts:5" in t and "posts:81" in t for t in fixes)
+    assert any("the operator ordered" in t and "not found verbatim" in t for t in fixes)
+    assert not any("Status report" in t or "alpha, bravo" in t for t in fixes)
+    assert not any('posts:81).' in t for t in fixes)  # the correctly cited quote is not flagged
+    assert len(fixes) == 3
+
+
+def test_gapcheck_ambiguous_cases_are_consider_not_fix(corpus, tmp_path, capsys):
+    report = (
+        "# Report\n\n"
+        '"heartbeat ok seq" lines repeat; one says "heartbeat ok seq 41" and is cited as posts:2.\n\n'
+        'A paraphrase: "Ran curl after setting HTTP_PROXY_OVERRIDE and editing /etc/hosts" (posts:81).\n\n'
+        'Scare quotes without a citation: "the team clearly panicked about the gate".\n\n'
+        "It happened on 2025-01-01.\n"
+    )
+    assert _gap(corpus, report, tmp_path) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["fix"] == []
+    kinds = {i["key"].split("|")[0] for i in out["consider"]}
+    assert "dates" in kinds and ({"near", "shortq"} & kinds)
+
+
+def test_gapcheck_dismiss_hides_an_item(corpus, tmp_path, capsys):
+    report = "# Report\n\nIt happened on 2025-01-01.\n"
+    assert _gap(corpus, report, tmp_path) == 0
+    item = next(i for i in json.loads(capsys.readouterr().out)["consider"] if i["key"].startswith("dates"))
+    assert cli.main(["gapcheck", "--dismiss", item["gid"], "--data", str(corpus)]) == 0
+    capsys.readouterr()
+    assert _gap(corpus, report, tmp_path) == 0
+    assert item["gid"] not in {i["gid"] for i in json.loads(capsys.readouterr().out)["consider"]}
+
+
+def test_timeline_finds_start_end_and_peaks(corpus, capsys):
+    assert cli.main(["timeline", "--data", str(corpus)]) == 0
+    out = capsys.readouterr().out
+    assert "first activity 2026-01-01" in out and "last activity" in out
+
+
+def test_combined_continue_runs_gapcheck_once_after_threshold():
+    import asyncio
+    from types import SimpleNamespace
+
+    from messageboard_audit_bench.native import combined_continue
+
+    now = [100]
+    calls = []
+
+    async def runner():
+        calls.append(now[0])
+        if now[0] < 120:
+            return None, {"error": "no report found"}  # no draft yet: try again later
+        return "Automatic check … 1 to fix, 2 to consider", {"fix": 1, "consider": 2}
+
+    record: dict = {}
+    hook = combined_continue(None, 110, record, runner=runner, clock=lambda: now[0])
+    tools = SimpleNamespace(output=SimpleNamespace(message=SimpleNamespace(tool_calls=["x"])))
+    assert asyncio.run(hook(tools)) is True and calls == []  # before the threshold
+    now[0] = 115
+    assert asyncio.run(hook(tools)) is True and calls == [115]  # no draft yet
+    now[0] = 125
+    assert asyncio.run(hook(tools)).startswith("Automatic check")
+    assert record["done"] and record["fix"] == 1 and record["attempts"] == 2
+    now[0] = 130
+    assert asyncio.run(hook(tools)) is True and len(calls) == 2  # only once
+
+
+def test_gapcheck_at_option_validation_and_prompt():
+    from messageboard_audit_bench.task import _german_wiki_report
+
+    s = _german_wiki_report(agent="react", tools="atlas", gapcheck_at=0.6, time_limit_minutes=10).dataset[0]
+    assert s.metadata["gapcheck_at"] == 0.6 and "atlas gapcheck" in s.input
+    with pytest.raises(ValueError):
+        _german_wiki_report(agent="react", gapcheck_at=0.6)  # needs tools=atlas
+    with pytest.raises(ValueError):
+        _german_wiki_report(agent="react", tools="atlas", gapcheck_at=1.5)

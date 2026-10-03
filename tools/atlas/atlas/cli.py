@@ -26,9 +26,11 @@ from .fmt import (
     short_day,
     snip,
 )
+from .gapcheck import cmd_gapcheck
 from .index import Index, build_index
 from .query import cmd_count, cmd_entities, cmd_join, cmd_pivot, cmd_rows
 from .themes import related
+from .timeline import cmd_timeline
 
 HELP = """atlas: a map of a log corpus. Compress first, expand on request.
 
@@ -50,6 +52,9 @@ HELP = """atlas: a map of a log corpus. Compress first, expand on request.
                                  filtered counts and group-bys, no scripting needed
   atlas rows TABLE [--where ...] [--fields a,b] [--sort time|FIELD] [--desc]
                                  matching rows, one line each, with their ids
+  atlas timeline                 when activity starts, ends, peaks, changes level, goes quiet
+  atlas gapcheck [REPORT]        check a report against the data: Fix (unsupported citations and
+                                 quotes) and Consider (optional coverage questions); --dismiss gID
   atlas join A.FIELD B.FIELD [-i]
                                  which values of one field appear in another (overlap, examples)
 
@@ -600,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
         print(HELP)
         return 0
     commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count",
-                "themes", "rows", "join")
+                "themes", "rows", "join", "timeline", "gapcheck")
     # Accept options before the command too (`atlas --data DIR overview`).
     first = next((i for i, a in enumerate(argv) if a in commands), None)
     if first:
@@ -650,6 +655,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exact", action="store_true")
     p.add_argument("--case", action="store_true")
     p.add_argument("--page", type=int, default=1)
+    sub.add_parser("timeline", parents=[common])
+    p = sub.add_parser("gapcheck", parents=[common])
+    p.add_argument("report", nargs="?")
+    p.add_argument("--dismiss", nargs="+")
     p = sub.add_parser("rows", parents=[common])
     p.add_argument("table")
     p.add_argument("--where", action="append")
@@ -691,6 +700,6 @@ def main(argv: list[str] | None = None) -> int:
     handler = {"overview": cmd_overview, "profile": cmd_profile, "clusters": cmd_clusters,
                "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen,
                "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count, "themes": cmd_themes,
-               "rows": cmd_rows, "join": cmd_join}[args.cmd]
+               "rows": cmd_rows, "join": cmd_join, "timeline": cmd_timeline, "gapcheck": cmd_gapcheck}[args.cmd]
     print(handler(idx, args))
     return 0
