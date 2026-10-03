@@ -41,6 +41,12 @@ from messageboard_audit_bench.investigation_tools import (
 )
 from messageboard_audit_bench.native_telemetry import event_coverage, hook_coverage
 from messageboard_audit_bench.provenance import host_provenance
+from messageboard_audit_bench.reading_crew import (
+    Crew,
+    crew_tool,
+    start_background_sweep,
+    take_background_digest,
+)
 from messageboard_audit_bench.report_length import (
     acceptance_limits,
     count_words,
@@ -243,8 +249,6 @@ def combined_continue(policy_epoch: int | None, gapcheck_epoch: int | None, reco
 
     async def on_continue(state: AgentState) -> bool | str:
         if crew is not None:
-            from messageboard_audit_bench.reading_crew import take_background_digest
-
             digest = take_background_digest(crew)
             if digest is not None:
                 return digest
@@ -706,14 +710,6 @@ def inspect_native_agent(
             state.metadata["atlas_install"] = await install_atlas()
             extra_tools.append(atlas_tool())
         if "crew" in investigation_tools:
-            # Imported only for crew runs, so atlas-only and baseline runs do not
-            # depend on the reading crew module.
-            from messageboard_audit_bench.reading_crew import (
-                Crew,
-                crew_tool,
-                start_background_sweep,
-            )
-
             crew = Crew(deadline_epoch=deadline_epoch)
             extra_tools.append(crew_tool(crew))
             if sweep_at_start:
