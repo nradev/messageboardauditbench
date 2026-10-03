@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -93,7 +94,7 @@ def test_commands_and_coverage(corpus, capsys):
     assert rare in capsys.readouterr().out
     assert cli.main(["expand", rare, *args]) == 0
     assert "/etc/hosts" in capsys.readouterr().out
-    opened, rows = coverage.load()
+    opened, rows, _listed = coverage.load()
     assert rare in opened and "posts:81" in rows
     assert cli.main(["unseen", *args]) == 0
     assert f" {rare} " not in capsys.readouterr().out
@@ -159,4 +160,99 @@ def test_count_with_where_and_by(corpus, capsys):
 
 def test_unseen_reports_coverage_of_top_salient(corpus, capsys):
     assert cli.main(["unseen", "--data", str(corpus)]) == 0
-    assert "of the most salient small clusters" in capsys.readouterr().out
+    assert "most salient rare records: shown" in capsys.readouterr().out
+
+
+def _themed_corpus(tmp_path, monkeypatch):
+    """Many differently worded posts about two activities, plus one isolated oddity."""
+    import random
+
+    rng = random.Random(0)
+    filler = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike".split()
+    rows = []
+    for i in range(240):
+        topic = ["backup", "restore", "snapshot", "volume"] if i % 2 else ["invoice", "payment", "refund", "ledger"]
+        words = rng.sample(filler, 6) + rng.sample(topic, 3) + [f"w{i}x{j}" for j in range(4)]
+        rng.shuffle(words)
+        rows.append({"time": f"2026-03-{1 + i % 28:02d}T08:{i % 60:02d}:00Z", "user": f"u{i % 40}",
+                     "body": " ".join(words) + f" note number {i} for the team"})
+    rows.append({"time": "2026-03-15T03:00:00Z", "user": "zz", "body": "zebra quokka narwhal axolotl " * 3})
+    d = tmp_path / "themed"
+    d.mkdir()
+    with (d / "notes.jsonl").open("w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    monkeypatch.setenv("ATLAS_CACHE", str(tmp_path / "cache2"))
+    monkeypatch.setenv("ATLAS_STATE", str(tmp_path / "state2.jsonl"))
+    return d
+
+
+def test_themes_find_topics_and_rare_records_say_whether_isolated(tmp_path, monkeypatch, capsys):
+    d = _themed_corpus(tmp_path, monkeypatch)
+    idx = build_index(d, use_cache=False)
+    seeds = {w for th in idx.themes for w in th.words}
+    assert {"backup", "invoice"} & seeds or {"restore", "payment"} & seeds
+    assert all(th.actors > 1 for th in idx.themes)
+    assert cli.main(["overview", "--data", str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "Themes: what is typical" in out
+    odd = next(c for c in idx.clusters if "zebra" in idx.text_of(c, c.leader))
+    assert odd.cid not in idx.cluster_themes
+    assert cli.main(["expand", idx.themes[0].tid, "--data", str(d)]) == 0
+    assert "example records" in capsys.readouterr().out
+
+
+def test_grep_is_smart_case_and_entities_kind_accepts_bare_field(corpus, capsys):
+    args = ["--data", str(corpus)]
+    assert cli.main(["grep", "bypass the gate", *args]) == 0
+    assert "posts:81" in capsys.readouterr().out
+    assert cli.main(["grep", "BYPASS", *args]) == 0
+    assert "no matches" in capsys.readouterr().out
+    assert cli.main(["entities", "--kind", "user", *args]) == 0
+    assert "rare_user" in capsys.readouterr().out
+
+
+def test_unseen_moves_already_listed_records_down(tmp_path, monkeypatch, capsys):
+    d = _themed_corpus(tmp_path, monkeypatch)
+    args = ["--data", str(d)]
+    assert cli.main(["unseen", *args]) == 0
+    first = capsys.readouterr().out
+    assert cli.main(["unseen", *args]) == 0
+    second = capsys.readouterr().out
+    ids = lambda out: re.findall(r"^ +(c\d+) ×", out, re.M)  # noqa: E731
+    assert ids(first) and ids(second)
+    assert ids(second)[0] not in ids(first)  # new material first on the second call
+    assert "shown in earlier lists but not opened" in second
+
+
+def test_show_accepts_cluster_and_theme_ids(corpus, capsys):
+    idx = build_index(corpus, use_cache=False)
+    rare = max(idx.clusters, key=lambda c: c.score)
+    assert cli.main(["show", rare.cid, "--data", str(corpus)]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("posts:81") and f"first record of {rare.cid}" in out
+
+
+def test_rows_filters_sorts_and_selects_fields(corpus, capsys):
+    args = ["--data", str(corpus)]
+    assert cli.main(["rows", "posts", "--where", "user=rare_user", "--fields", "user,kind", *args]) == 0
+    out = capsys.readouterr().out
+    assert "posts where user=rare_user: 1 rows" in out and "posts:81 (id=r80)" in out and "kind=post" in out
+    assert cli.main(["rows", "posts", "--where", "body~heartbeat", "--sort", "time", "--desc", *args]) == 0
+    assert "40 rows" in capsys.readouterr().out
+    assert cli.main(["rows", "posts", "--fields", "nope", *args]) == 0
+    assert "unknown field" in capsys.readouterr().out
+
+
+def test_join_reports_overlap_between_fields(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "j"
+    d.mkdir()
+    (d / "a.jsonl").write_text("".join(json.dumps({"page": p}) + "\n" for p in ["x", "y", "y", "z"]))
+    (d / "b.jsonl").write_text("".join(json.dumps({"name": p}) + "\n" for p in ["Y", "z", "w"]))
+    monkeypatch.setenv("ATLAS_CACHE", str(tmp_path / "c"))
+    monkeypatch.setenv("ATLAS_STATE", str(tmp_path / "s.jsonl"))
+    assert cli.main(["join", "a.page", "b.name", "--data", str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "a.page: 3 distinct values; 1 also in b.name (1/4 rows matched)" in out
+    assert cli.main(["join", "a.page", "b.name", "-i", "--data", str(d)]) == 0
+    assert "2 also in b.name (3/4 rows matched)" in capsys.readouterr().out

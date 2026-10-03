@@ -321,3 +321,179 @@ answer key; we kept the conclusions that also follow from behaviour alone.
 - Verified: 13 atlas tests pass; ruff clean; full suite only has the 2
   pre-existing `test_share_site.py` failures; scripted mock run in the real
   sandbox exercised `overview`, `expand`, `entities`, `pivot`, `count`, `grep`.
+
+## Pilot 2: atlas vs baseline, one run each (GLM 5.3, react, 10 min, judge gpt-6.1-sol)
+
+Logs: `logs/atlas-smoke/2026-10-02T22-01-21-…Aw5C5oHpxNvCrdEYWTr6Po.eval`,
+`logs/atlas-baseline/2026-10-02T22-03-01-…TX2Q735s99u4uTgC3SAtd9.eval`
+(scored inline with `--time-limit 2400`, which fixed the scoring timeout).
+
+| | atlas | baseline |
+|---|---|---|
+| finding coverage (`max(2s-1,0)`) | 0.242 | 0.258 |
+| TL;DR | 0.4 | 0.6 |
+| combined | 0.289 | 0.361 |
+| atlas calls / share / last use | 25 / 28% / at 41% | – |
+| model input tokens | 447k | 251k |
+| first report write | 178s | 109s |
+
+- Coverage is a tie with a different mix (atlas better on attribution, baseline
+  on the GET-only restriction and task structure). The gap is one 0.2 step on
+  the TL;DR grade; round-4 GLM spread at 10 min was 0.31–0.39. One pair
+  cannot show that atlas hurts.
+- Adoption much better than pilot 1 (25 calls incl. `count`, `entities`,
+  `pivot`, `show` by record id).
+- **Failure mode: attention captured by outliers.** The overview's salient
+  lists put an `XSSChainUser` request and other probe URLs on screen; the agent
+  expanded them, pivoted on the IP and ran six `show`s verifying the payload,
+  then framed its summary around attack and cleanup. Judge: "mainly receives a
+  spam-and-cleanup narrative … falsely describes the unsuccessful XSS chain as
+  working". It opened 0/50 of the top salient revision bodies; the footer's
+  `atlas expand c3939` (main storyline) was not followed this time.
+- **The overview had no gist.** "Biggest" ranked by raw size showed
+  placeholders (`Describe the new page here.`, `*`, `<*>`, `test`, `rel`). The
+  real gist (agents coordinating timed, multi-round tasks) is spread over
+  hundreds of differently worded posts that near-duplicate clustering cannot
+  group. The baseline agent got it by reading coordination pages.
+- Friction: `entities --kind ip16` needed `events.ip16`; a case-sensitive grep
+  typo; ~3k chars of overview on a short, noisy field.
+
+## Step 8: themes, related/isolated cues, overview budget, friction fixes
+
+- **New: themes (`atlas/themes.py`, `atlas themes`, `atlas expand tNN`).**
+  What is typical: clusters whose leaders share a characteristic word, ranked
+  by distinct actors. Built from topic words (in some records, not most;
+  stopwords removed with a small English list), not copy-paste similarity.
+  - First version: themes were mostly near-copies of one topic and several
+    were seeded by function words ("this", "our", "from"). Fixed with the
+    stopword list and **merging**: a candidate theme whose records are ≥40%
+    inside an earlier theme is folded in.
+  - **Bug found by a synthetic test:** a word present in >15% of records could
+    not seed a theme (the cap was inherited from the diversity step), so the
+    most dominant activity in a corpus could be invisible. Theme seeds now use
+    their own ≤40% cutoff; "related" keeps 15%.
+  - Wiki top theme now: `cohort, please, task, due, relay, clock, deadline`
+    (179 actors, 3,204 rows); `expand t1` shows timed-task coordination posts
+    spread over time and actors. Mythos 5 themes pick out episodes (captcha
+    rounds, foothold/postgres/minio, a wallet site) with 1–3 "actors" (roles).
+  - Themes lead the overview, replacing size-ranked "biggest" lines.
+- **Change: rare records say whether they are part of something larger.**
+  Each salient item shows `related: N (shared words)` (records sharing ≥50%
+  of its topic words) and `in theme tX` / `in no theme`. The related count
+  alone undercounted long posts (the top rare post showed "related: 1" while
+  plainly belonging to the main activity), so theme membership was added; it
+  is the direct cue. On the wiki the top rare post is "in theme t1"; the probe
+  requests are "related: none; in no theme".
+- **Overview budget.** Trivial templates (few letters once wildcards are
+  removed) are kept out; fields count as major only with long values (mean
+  ≥80 chars), minor fields get 2 rare lines and no "largest" lines; text
+  fields with <50 values fold into one line. Sizes: wiki 6.1k chars (was
+  8.6k), RubyHack 3.1k, Mythos 5 8.3k (many text fields; still the largest).
+- **Friction:** `entities --kind ip16` matches `*.ip16` in every file; `grep`
+  is smart-case (case-insensitive unless the pattern has upper case).
+- **Prompt (one tool-specific line, both tool description and addendum):**
+  overview's themes show what is typical; rare records, `unseen` and
+  `entities` show what is unusual, and each rare record says whether it
+  belongs to a theme. No general investigation advice (that would also help
+  the baseline and confound the comparison).
+- Costs: index build at setup 14.5s (themes add ~1s). Tests: 15 atlas tests
+  pass; ruff clean; full suite only the 2 pre-existing failures; real-sandbox
+  mock run including `expand t1` succeeded.
+- Next: ≥3 epochs per condition before reading anything into score
+  differences.
+
+## Pilot 3: atlas with themes, 3 epochs (GLM 5.3, react, 10 min, judge gpt-6.1-sol)
+
+Log: `logs/atlas-pilot3/2026-10-03T08-56-38-…AMruCdSK2mgEncgb8uX73f.eval`. The
+paired 3-epoch baseline (`logs/atlas-baseline3/`) failed: one sample broke the
+minimum-runtime rule (9th early `submit` at ~450s) and, with Inspect's default
+`fail_on_error`, the other two were cancelled. No baseline scores yet;
+comparisons below use pilot 2's single baseline run (same judge).
+
+| run | coverage | TL;DR | combined | atlas calls (share) | last atlas use |
+|---|---|---|---|---|---|
+| atlas e1 | 0.379 | 0.5 | 0.415 | 8 (7%) | 37% |
+| atlas e2 | 0.295 | 0.6 | 0.386 | 13 (14%) | 82% |
+| atlas e3 | 0.268 | 0.5 | 0.338 | 18 (21%) | 72% |
+| **atlas mean** | **0.314** | **0.53** | **0.380** | | |
+| pilot-2 baseline (1 run) | 0.258 | 0.6 | 0.361 | – | – |
+| pilot-2 atlas (1 run, before themes) | 0.242 | 0.4 | 0.289 | 25 (28%) | 41% |
+
+- **Themes set the framing.** In all three runs the reasoning right after
+  `overview`/`expand t1` names the main storyline (agents coordinating timed,
+  multi-round tasks through the wiki); TL;DR 0.5/0.6/0.5 vs 0.4 for the
+  pre-themes atlas run. No run was captured by the probe/XSS outliers.
+- **Long-tail findings appear.** Findings at 0 in both pilot-2 runs score in
+  some pilot-3 runs: NO_PROXY exception (mean 0.30), /etc/hosts mapping (0.33),
+  heartbeat program (0.40), ZZZ backups (0.43). Agents noticed rare records
+  from `unseen` listings themselves (e.g. "c3758 … independent technical
+  confirmation: the claimed blob-host bypass is real" found by `unseen --page 2`
+  just before submitting) rather than by expanding them, so "opened 0/50"
+  understates what they saw.
+- **Usage pattern:** `overview` → `profile`/`themes` → `expand t1` → `unseen`
+  (2 calls in every run, as prompted) and, in e3, atlas as a query engine
+  (`count --where … --by day`, field-limited `grep`, `pivot`). Most work is
+  still bash (25–48 calls) and report editing.
+- **Friction:** `show c3939` / `show c4207` (cluster ids) rejected, 2 wasted
+  calls. All other "no matches" were genuine negative checks.
+- **Bash patterns that remain** (what atlas does not yet cover):
+  row selection with conditions and chosen fields (`label in (...)`,
+  `ip16 == …`, `name == …` → print rows) — the commonest; joins between files
+  (do deleted pages appear among created pages / in pages.jsonl?); decoding a
+  base64 payload; `head -c` of raw files despite `profile` examples; flat
+  regex hit lists with ids for citation checks.
+- **Cost:** uncached input tokens 0.7–1.2M per atlas run vs 0.25M for the
+  baseline (cache reads ~5–6M vs 3.2M). Atlas runs made more model calls
+  (78–80 vs 61) and had more calls that missed the prompt cache (8–14 vs 5),
+  each re-sending ~80k tokens of context. The log does not record which
+  OpenRouter provider served each call; provider switching is the likely
+  cause of the misses.
+- `usage_metrics.py`: fixed parsing of bash commands stored as
+  `attachment://` references; added the headline score per sample.
+
+## Step 9: unseen that moves on, show by cluster/theme id, rows, join; provider pin; four metrics
+
+Each addition was checked against "not tuned to one model, these runs, or this
+dataset": kept only if it is a basic data operation any agent needs on any
+log corpus, and exercised on the wiki, Mythos 5 (one transcript) and RubyHack
+(package diffs).
+
+- **Change: `unseen` tracks three states per record** (not shown, shown in a
+  listing, opened). Agents act on one-line entries without opening them, and
+  the coverage log stored only how many items a command listed, so a second
+  `unseen` call repeated the first page. The log now stores listed ids;
+  `unseen` puts records not shown before first, then shown-but-unopened ones.
+  Its page 1 also lists the top 3 unopened, unshown themes (one line each with
+  their words; after the coverage line, not leading, since `unseen` is mostly
+  used late and is about the long tail) and at most 3 non-trivial big
+  clusters. Coverage reads "shown k, opened m" of the 50 most salient. Three
+  successive calls on the wiki: shown 0 → 14 → 22 of the top 50, each call
+  with new themes, big clusters and rare records.
+  - Bug in the first version: big clusters and themes listed by `unseen` were
+    not recorded as shown, so they repeated; fixed.
+- **`show cNNN` / `show tNN`** shows the group's first record (for a theme,
+  its most typical cluster's first record). The pilot agent's two
+  `show c3939`-style calls were rejected before.
+- **New `rows TABLE --where … [--fields a,b] [--sort time|FIELD] [--desc]`**:
+  one line per matching row with time, `file:line (id=…)` and the chosen
+  fields (default: actor and category fields plus a text snippet). The
+  commonest remaining bash pattern in pilots 1 and 3.
+- **New `join A.FIELD B.FIELD [-i]`**: distinct values and rows on each side
+  with a match on the other, and the most frequent / rarest values in both,
+  only-left and only-right.
+- **Deferred:** decoding base64 / percent-encoded strings in `show`. Generic as
+  an operation, but the only evidence for it is agents chasing one known
+  finding in this dataset.
+- Tool description and prompt line list `rows` and `join`; `unseen`'s
+  description says each call moves on.
+- `usage_metrics.py` reports listed vs opened ("most salient rare records:
+  shown x/50, opened y/50"; older logs are flagged as predating it) and all
+  four score numbers: raw findings, coverage, TL;DR, combined.
+- `RUN.md`: GLM 5.3 pinned to OpenRouter provider `inference-net` with no
+  fallback (`-M provider=…`) in both conditions, to keep the prompt cache warm
+  and run both on one backend; `--retry-on-error` removed (cost);
+  `--no-fail-on-error --score-on-error` kept.
+- Verified: 19 atlas tests (new: unseen moves on, show by id, rows, join);
+  ruff clean; full suite only the 2 pre-existing failures; real-sandbox mock
+  run calling overview, expand c/t, pivot, show c3939, rows, join, unseen ×2,
+  count, grep — all recorded in `atlas_coverage`.

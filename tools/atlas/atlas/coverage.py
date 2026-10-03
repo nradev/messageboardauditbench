@@ -1,8 +1,9 @@
 """Coverage log: which clusters and rows the agent has actually seen.
 
 Every command appends one JSON line to ``$ATLAS_STATE`` (default ``~/.atlas/coverage.jsonl``).
-``opened`` lists units (clusters or windows) whose content was shown; ``seen_rows`` lists
-row refs whose text was shown at length. ``unseen`` reads it back, and the same file is the
+``opened`` lists units (clusters, themes, windows) whose content was shown; ``seen_rows``
+lists row refs whose text was shown at length; ``listed`` lists units that appeared as a
+one-line entry in some listing (agents often act on those without opening them). ``unseen`` reads it back, and the same file is the
 per-run process metric (how much of the long tail the agent opened).
 """
 
@@ -25,7 +26,7 @@ def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=()) -> Non
         "args": args,
         "opened": sorted(set(opened)),
         "seen_rows": sorted(set(seen_rows)),
-        "listed": len(set(listed)),
+        "listed": sorted(set(listed)),
     }
     try:
         p = state_path()
@@ -36,9 +37,11 @@ def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=()) -> Non
         pass
 
 
-def load() -> tuple[set[str], set[str]]:
+def load() -> tuple[set[str], set[str], set[str]]:
+    """(opened unit ids, row refs seen at length, unit ids shown in any listing)."""
     opened: set[str] = set()
     rows: set[str] = set()
+    listed: set[str] = set()
     try:
         with state_path().open(encoding="utf-8") as f:
             for line in f:
@@ -48,6 +51,8 @@ def load() -> tuple[set[str], set[str]]:
                     continue
                 opened.update(e.get("opened", ()))
                 rows.update(e.get("seen_rows", ()))
+                if isinstance(e.get("listed"), list):  # older logs stored only a count
+                    listed.update(e["listed"])
     except OSError:
         pass
-    return opened, rows
+    return opened, rows, listed

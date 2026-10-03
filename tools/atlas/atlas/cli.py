@@ -27,25 +27,31 @@ from .fmt import (
     snip,
 )
 from .index import Index, build_index
-from .query import cmd_count, cmd_entities, cmd_pivot
+from .query import cmd_count, cmd_entities, cmd_join, cmd_pivot, cmd_rows
+from .themes import related
 
 HELP = """atlas: a map of a log corpus. Compress first, expand on request.
 
-  atlas overview                 start here: files, guessed fields, biggest and most salient clusters
+  atlas overview                 start here: files, fields, themes (what is typical), rare records
+  atlas themes [--field T.F]     topics shared by many records and actors (tNN); atlas expand tNN
   atlas profile [TABLE]          fields: roles, counts, top/rare values, time range and precision
   atlas clusters [--field T.F] [--sort salience|size|time] [--page N]
                                  list clusters of near-duplicate values (cNN) or windows (wNN)
-  atlas expand ID [--n N]        open a cluster or window: span, actors, varied examples
+  atlas expand ID [--n N]        open a theme (tNN), cluster (cNN) or window (wNN): span, actors, examples
   atlas show REF [--offset N]    one row in full: REF = file:line (1-based line in the source
                                  file, also valid in shell/python, e.g. logs:120) or the record's id
   atlas grep PATTERN [-i] [--field T.F] [--page N]
                                  regex search, hits grouped by cluster, rare hits first
-  atlas unseen [--page N]        salient clusters you have not opened yet, plus coverage so far
+  atlas unseen [--page N]        rare records not opened yet, new ones first (each call moves on)
   atlas entities [--kind K] [--sort rare|count|first]
                                  values to pivot on (field values, hosts, IPs, paths...), rare first
   atlas pivot VALUE [--exact]    every row in any file containing VALUE, as one timeline
   atlas count TABLE[.FIELD] [--where F=V|F!=V|F~RE ...] [--by day|hour|FIELD]
                                  filtered counts and group-bys, no scripting needed
+  atlas rows TABLE [--where ...] [--fields a,b] [--sort time|FIELD] [--desc]
+                                 matching rows, one line each, with their ids
+  atlas join A.FIELD B.FIELD [-i]
+                                 which values of one field appear in another (overlap, examples)
 
 Data directory: --data DIR or $ATLAS_DATA (default: current directory).
 Field guesses can be overridden: --time-field F --actor-field F[,F] --text-field F[,F].
@@ -69,7 +75,20 @@ def top_actors(idx: Index, c: Cluster, k: int = 2) -> str:
     return "; ".join(parts)
 
 
-def one_line(idx: Index, c: Cluster, width: int = 110) -> str:
+def related_note(idx: Index, c: Cluster) -> str:
+    """How many other records share most of this one's topic words: an unusual variant of a
+    widespread activity, or an isolated oddity."""
+    ti = idx.topics.get((c.table, c.field))
+    if c.kind != "cluster" or ti is None or c.cid not in ti.words:
+        return ""
+    n, words = related(ti, c.cid)
+    themes = idx.cluster_themes.get(c.cid, [])
+    in_themes = f"; in theme {', '.join(themes[:3])}" if themes else "; in no theme"
+    rel = f"related: {n}" + (f" ({', '.join(words[:3])})" if words else "") if n else "related: none"
+    return f"  {rel}{in_themes}"
+
+
+def one_line(idx: Index, c: Cluster, width: int = 110, rel: bool = False) -> str:
     a, b = span(idx, c)
     when = short_day(a) if a == b or not b or short_day(a) == short_day(b) else f"{short_day(a)}→{short_day(b)}"
     sig = f" [{','.join(sorted(c.signals))}]" if c.signals else ""
@@ -77,7 +96,25 @@ def one_line(idx: Index, c: Cluster, width: int = 110) -> str:
     head = f"{c.cid:>6} ×{c.size:<5} {when:<11} {where}{sig}"
     who = top_actors(idx, c)
     text = c.template if c.template and c.size > 1 else idx.display_text(c, c.leader)
-    return f"{head}  {who}\n         | {snip(text, width)}"
+    note = related_note(idx, c) if rel else ""
+    return f"{head}  {who}{note}\n         | {snip(text, width)}"
+
+
+def is_trivial(idx: Index, c: Cluster) -> bool:
+    """Placeholder-like records (``*``, ``<*>``, ``test``, a default page line): few letters
+    once wildcards are removed. Listed by `clusters`, kept out of the overview."""
+    text = c.template if c.template else idx.display_text(c, c.leader)
+    fixed = [t for t in text.split() if t != "<*>"]
+    return sum(ch.isalpha() for ch in " ".join(fixed)) < 12 or (c.template is not None and len(fixed) <= 2)
+
+
+def theme_line(idx: Index, th, width: int = 120) -> str:
+    unit = idx.by_id[th.tid]
+    a, b = span(idx, unit)
+    when = short_day(a) if not b or short_day(a) == short_day(b) else f"{short_day(a)}→{short_day(b)}"
+    ex = idx.by_id[th.example]
+    return (f"{th.tid:>6} {th.rows:>6,} rows, {th.actors:>4} actors, {len(th.clusters):,} clusters, {when}  "
+            f"{th.table}.{th.field}: {', '.join(th.words)}\n         | e.g. {snip(idx.display_text(ex, ex.leader), width)}")
 
 
 # ---------- commands ----------
@@ -118,28 +155,42 @@ def cmd_overview(idx: Index, args) -> str:
         by_field.setdefault((c.table, c.field), []).append(c)
     opened = []
     listed = []
+    themes = sorted(idx.themes, key=lambda t: (-t.actors, -t.rows))[:8]
+    if themes:
+        out.append("\nThemes: what is typical, topics shared by many records and actors (atlas themes; atlas expand tNN):")
+        out += [theme_line(idx, th, 100) for th in themes]
+        listed += [th.tid for th in themes]
     total_vals = sum(c.size for c in idx.clusters) or 1
+    small_fields = []
     for (table, f), cl in sorted(by_field.items(), key=lambda kv: -sum(c.size for c in kv[1])):
         n_vals = sum(c.size for c in cl)
         singles = sum(1 for c in cl if c.size == 1)
-        share = n_vals / total_vals
-        n_big = 3 if share < 0.2 else 6
-        n_sal = 3 if share < 0.2 else 10
+        if n_vals < 50:
+            small_fields.append(f"{table}.{f} ({n_vals})")
+            continue
+        # Major fields carry long text; short fields (summaries, labels) get a few lines.
+        mean_len = idx.profiles[table].fields[f].mean_len
+        major = n_vals / total_vals >= 0.2 and mean_len >= 80
+        n_big, n_sal = (3, 8) if major else (0, 2)
         out.append(f"\n{table}.{f}: {n_vals:,} values in {len(cl):,} clusters ({singles:,} singletons)")
-        big = sorted(cl, key=lambda c: -c.size)[:n_big]
-        out.append("  Biggest (the gist):")
-        out += ["  " + one_line(idx, c, 100) for c in big]
-        sal = diversify(idx, sorted((c for c in cl if c.size <= 5 and c not in big), key=lambda c: -c.score))[:n_sal]
+        big = [c for c in sorted(cl, key=lambda c: -c.size) if c.size > 5 and not is_trivial(idx, c)][:n_big]
+        if big:
+            out.append("  Largest groups of repeated records:")
+            out += ["  " + one_line(idx, c, 90) for c in big]
+        sal = diversify(idx, sorted((c for c in cl if c.size <= 5 and not is_trivial(idx, c)),
+                                    key=lambda c: -c.score))[:n_sal]
         if sal:
-            out.append("  Most salient small clusters (rare + rich content):")
-            out += ["  " + one_line(idx, c, 140) for c in sal]
+            out.append("  Rare records with the richest content (related = records sharing their topic words):")
+            out += ["  " + one_line(idx, c, 110, rel=True) for c in sal]
         listed += [c.cid for c in big + sal]
+    if small_fields:
+        out.append("\nSmaller text fields (atlas clusters --field T.F): " + ", ".join(small_fields))
     if idx.windows:
         out.append(f"\nLow-redundancy tables (mostly unique rows) are also split into {len(idx.windows)} "
                    f"windows of consecutive rows: atlas clusters --windows")
     best = next((c.cid for c in sorted(idx.clusters, key=lambda c: -c.score) if c.size <= 5), None)
-    out.append("\n" + footer(f"atlas expand {best}" if best else "", "atlas unseen", "atlas entities",
-                             "atlas grep PATTERN", "atlas profile"))
+    out.append("\n" + footer(f"atlas expand {themes[0].tid}" if themes else "", f"atlas expand {best}" if best else "",
+                             "atlas unseen", "atlas entities", "atlas grep PATTERN"))
     coverage.record("overview", [], opened=opened, listed=listed)
     return "\n".join(out)
 
@@ -265,7 +316,9 @@ def per_day(idx: Index, c: Cluster) -> str:
 def cmd_expand(idx: Index, args) -> str:
     c = idx.by_id.get(args.id)
     if not c:
-        return f"unknown id {args.id!r}; ids look like c12 (cluster) or w3 (window). Try: atlas clusters"
+        return f"unknown id {args.id!r}; ids look like c12 (cluster), t3 (theme) or w3 (window). Try: atlas overview"
+    if c.kind == "theme":
+        return expand_theme(idx, c, args)
     a, b = span(idx, c)
     where = f"{c.table}.{c.field}" if c.kind == "cluster" else f"{c.table} rows (window)"
     out = [f"{c.cid}: {c.size:,} rows of {where}, {fmt_time(a)} → {fmt_time(b)}"]
@@ -305,10 +358,58 @@ def cmd_expand(idx: Index, args) -> str:
     return "\n".join(out)
 
 
+def expand_theme(idx: Index, unit: Cluster, args) -> str:
+    th = next(t for t in idx.themes if t.tid == unit.cid)
+    a, b = span(idx, unit)
+    out = [f"{th.tid}: theme in {th.table}.{th.field}: {th.rows:,} rows in {len(th.clusters):,} clusters, "
+           f"{th.actors} actors, {fmt_time(a)} → {fmt_time(b)}",
+           f"words: {', '.join(th.words)}"]
+    biggest = sorted((idx.by_id[cid] for cid in th.clusters), key=lambda c: -c.size)[:5]
+    out.append("largest clusters in it: " + ", ".join(f"{c.cid} ×{c.size}" for c in biggest))
+    pd = per_day(idx, unit)
+    if pd:
+        out.append(pd)
+    picks = _diverse(idx, unit, max(args.n, 8))
+    out.append(f"\n{len(picks)} example records, spread over time and actors:")
+    seen = []
+    for r in picks:
+        cid = idx.row_cluster.get((th.table, th.field, r))
+        who = " ".join(f"{f}={v}" for f, v in idx.actor_of(th.table, r))
+        out.append(f"--- {ref_id(idx, th.table, r)}  {fmt_time(idx.time_of(th.table, r))}  {who}  [{cid}]")
+        text = idx.display_text(idx.by_id[cid], r) if cid else idx.text_of(unit, r)
+        out.append(text if len(text) <= 500 else text[:500] + f" … [atlas show {ref(th.table, r)}]")
+        seen.append(ref(th.table, r))
+    out.append(footer(f"atlas expand {biggest[0].cid}" if biggest else "", f"atlas grep {th.words[0]!r}",
+                      "atlas themes"))
+    coverage.record("expand", [th.tid], opened=[th.tid], seen_rows=seen)
+    return "\n".join(out)
+
+
+def cmd_themes(idx: Index, args) -> str:
+    themes = sorted(idx.themes, key=lambda t: (-t.actors, -t.rows))
+    if args.field:
+        t, _, f = args.field.partition(".")
+        themes = [th for th in themes if th.table == t and (not f or th.field == f)]
+    if not themes:
+        return "no themes (fields with fewer than 100 clusters get none). Try atlas clusters."
+    shown, note = paginate(themes, args.page)
+    out = [f"{len(themes)} themes, most actors first {note}:"]
+    out += [theme_line(idx, th) for th in shown]
+    out.append(footer(f"atlas expand {shown[0].tid}", "atlas unseen"))
+    coverage.record("themes", [args.field or "", f"page={args.page}"], listed=[th.tid for th in shown])
+    return "\n".join(out)
+
+
 def parse_ref(idx: Index, s: str) -> tuple[str, int] | None:
     table, _, line = s.rpartition(":")
     if table in idx.tables and line.isdigit() and 1 <= int(line) <= len(idx.tables[table].rows):
         return table, int(line) - 1
+    unit = idx.by_id.get(s)  # a cluster or theme id: its first (earliest) record
+    if unit is not None and unit.kind in ("cluster", "theme"):
+        if unit.kind == "theme":
+            th = next(t for t in idx.themes if t.tid == unit.cid)
+            unit = idx.by_id[th.example]
+        return unit.table, unit.leader
     return idx.id_lookup.get(s)  # the record's own id value
 
 
@@ -316,10 +417,12 @@ def cmd_show(idx: Index, args) -> str:
     p = parse_ref(idx, args.ref)
     if not p:
         return (f"unknown ref {args.ref!r}; use FILE:LINE (1-based line number, FILE one of "
-                f"{', '.join(idx.tables)}) or a record id")
+                f"{', '.join(idx.tables)}), a record id, or a cluster/theme id (cNN, tNN)")
     table, row = p
     r = idx.tables[table].rows[row]
     out = [ref_id(idx, table, row)]
+    if args.ref in idx.by_id:
+        out[0] += f"  (first record of {args.ref}; atlas expand {args.ref} for the rest)"
     opened = []
     limit = 6000
     for k, v in r.items():
@@ -344,7 +447,9 @@ def cmd_show(idx: Index, args) -> str:
 
 def cmd_grep(idx: Index, args) -> str:
     try:
-        rx = re.compile(args.pattern, re.I if args.i else 0)
+        # Smart case: case-insensitive unless the pattern has an upper-case letter (or -i).
+        ignore = args.i or not any(ch.isupper() for ch in args.pattern)
+        rx = re.compile(args.pattern, re.I if ignore else 0)
     except re.error as e:
         return f"bad regex: {e}. Escape special characters or use a simpler pattern."
     groups: dict[str, list[tuple[int, str]]] = {}  # cid -> [(row, matched text)]
@@ -374,7 +479,7 @@ def cmd_grep(idx: Index, args) -> str:
                     other[key] += 1
                     other_rows.setdefault(key, []).append(ref(name, i))
     if not hit_rows:
-        return f"no matches for /{args.pattern}/" + (" (case-sensitive; add -i)" if not args.i else "")
+        return f"no matches for /{args.pattern}/" + ("" if ignore else " (case-sensitive because of upper case; add -i)")
     clusters = [idx.by_id[c] for c in groups]
     big = sorted((c for c in clusters if c.size > 5), key=lambda c: -len(groups[c.cid]))
     small = diversify(idx, sorted((c for c in clusters if c.size <= 5), key=lambda c: -c.score))
@@ -403,7 +508,8 @@ def cmd_grep(idx: Index, args) -> str:
             t = idx.time_of(c.table, row)
             who = " ".join(f"{f}={v}" for f, v in idx.actor_of(c.table, row))
             sig = f" [{','.join(sorted(c.signals))}]" if c.signals else ""
-            out.append(f"{c.cid:>6} ×{c.size} {ref_id(idx, c.table, row)} {fmt_time(t)} {who}{sig}\n         | {ctx}")
+            out.append(f"{c.cid:>6} ×{c.size} {ref_id(idx, c.table, row)} {fmt_time(t)} {who}{sig}"
+                       f"{related_note(idx, c)}\n         | {ctx}")
             seen.append(ref(c.table, row))
     if args.page == 1 and other:
         out.append("\nOther fields (value ×rows):")
@@ -423,36 +529,53 @@ def cmd_grep(idx: Index, args) -> str:
 
 
 def cmd_unseen(idx: Index, args) -> str:
-    opened, seen_rows = coverage.load()
+    """What the agent has not looked at yet. Three states per record: not shown anywhere,
+    shown as a one-line entry in some listing, opened (expanded or shown in full). Records
+    not shown yet come first, so calling `unseen` again brings up new material."""
+    opened, seen_rows, listed = coverage.load()
 
-    def is_seen(c: Cluster) -> bool:
+    def is_opened(c: Cluster) -> bool:
         return c.cid in opened or any(ref(c.table, r) in seen_rows for r in c.members[:50])
 
-    small = [c for c in idx.clusters if c.size <= 5]
-    big = [c for c in idx.clusters if c.size > 5]
-    rest = diversify(idx, sorted((c for c in small if not is_seen(c)), key=lambda c: -c.score))
-    s_seen = len(small) - len(rest)
-    b_seen = sum(1 for c in big if is_seen(c))
-    top_seen = sum(1 for cid in idx.top_salient if is_seen(idx.by_id[cid]))
-    out = [f"coverage: opened {top_seen}/{len(idx.top_salient)} of the most salient small clusters "
-           f"({s_seen:,}/{len(small):,} of all small clusters), {b_seen:,}/{len(big):,} big clusters"]
+    small = [c for c in idx.clusters if c.size <= 5 and not is_trivial(idx, c)]
+    big = [c for c in idx.clusters if c.size > 5 and not is_trivial(idx, c)]
+    ranked = diversify(idx, sorted((c for c in small if not is_opened(c)), key=lambda c: -c.score))
+    fresh = [c for c in ranked if c.cid not in listed]
+    shown_before = [c for c in ranked if c.cid in listed]
+    rest = fresh + shown_before
+    top = [idx.by_id[cid] for cid in idx.top_salient]
+    out = [f"coverage of the {len(top)} most salient rare records: shown {sum(c.cid in listed for c in top)}, "
+           f"opened {sum(is_opened(c) for c in top)}; all rare records: shown "
+           f"{sum(c.cid in listed for c in small):,}, opened {sum(is_opened(c) for c in small):,} of {len(small):,}"]
     if idx.windows:
-        w_seen = sum(1 for w in idx.windows if is_seen(w))
-        out[0] += f", {w_seen:,}/{len(idx.windows):,} windows"
-    big_unseen = sorted((c for c in big if not is_seen(c)), key=lambda c: -c.size)
-    if args.page == 1 and big_unseen:
-        out.append(f"\nUnopened big clusters ({len(big_unseen)}; largest first, one line each):")
-        out += [one_line(idx, c, 100) for c in big_unseen[:5]]
+        w_open = sum(1 for w in idx.windows if is_opened(w))
+        out[0] += f"; windows opened {w_open:,}/{len(idx.windows):,}"
+    also_listed = []
+    if args.page == 1:
+        themes_left = [th for th in sorted(idx.themes, key=lambda t: (-t.actors, -t.rows))
+                       if th.tid not in opened and th.tid not in listed]
+        if themes_left:
+            out.append(f"\nThemes not opened or shown yet ({len(themes_left)}; top 3):")
+            out += [theme_line(idx, th, 90) for th in themes_left[:3]]
+            also_listed += [th.tid for th in themes_left[:3]]
+        big_left = sorted((c for c in big if not is_opened(c) and c.cid not in listed), key=lambda c: -c.size)
+        if big_left:
+            out.append(f"\nLargest repeated records not shown yet ({len(big_left)}; top 3):")
+            out += [one_line(idx, c, 90) for c in big_left[:3]]
+            also_listed += [c.cid for c in big_left[:3]]
     shown, note = paginate(rest, args.page)
-    out.append(f"\nUnopened small clusters, most salient first {note}:")
-    out += [one_line(idx, c, 140) for c in shown]
+    label = "not shown before" if shown and shown[0].cid not in listed else "shown before but not opened"
+    out.append(f"\nRare records not opened, {label} first, most salient first {note}:")
+    out += [one_line(idx, c, 120, rel=True) for c in shown]
+    if fresh and len(fresh) < len(rest):
+        out.append(f"  ({len(fresh):,} not shown before; {len(shown_before):,} shown in earlier lists but not opened)")
     if idx.windows:
-        wins = [w for w in idx.windows if not is_seen(w)]
+        wins = [w for w in idx.windows if not is_opened(w)]
         out.append(f"\nUnopened windows ({len(wins)}), in order: " + " ".join(w.cid for w in wins[:30]) +
                    (" …" if len(wins) > 30 else ""))
-    out.append(footer(f"atlas expand {shown[0].cid}" if shown else "",
-                      f"atlas unseen --page {args.page + 1}" if len(rest) > args.page * PAGE else ""))
-    coverage.record("unseen", [str(args.page)], listed=[c.cid for c in shown])
+    out.append("Records listed here count as shown: the next `atlas unseen` starts with new ones.")
+    out.append(footer(f"atlas expand {shown[0].cid}" if shown else "", "atlas unseen"))
+    coverage.record("unseen", [f"page={args.page}"], listed=[c.cid for c in shown] + also_listed)
     return "\n".join(out)
 
 
@@ -476,7 +599,8 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(HELP)
         return 0
-    commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count")
+    commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count",
+                "themes", "rows", "join")
     # Accept options before the command too (`atlas --data DIR overview`).
     first = next((i for i, a in enumerate(argv) if a in commands), None)
     if first:
@@ -513,6 +637,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--page", type=int, default=1)
     p = sub.add_parser("unseen", parents=[common])
     p.add_argument("--page", type=int, default=1)
+    p = sub.add_parser("themes", parents=[common])
+    p.add_argument("--field")
+    p.add_argument("--page", type=int, default=1)
     p = sub.add_parser("entities", parents=[common])
     p.add_argument("--kind")
     p.add_argument("--sort", choices=["rare", "count", "first"], default="rare")
@@ -523,6 +650,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exact", action="store_true")
     p.add_argument("--case", action="store_true")
     p.add_argument("--page", type=int, default=1)
+    p = sub.add_parser("rows", parents=[common])
+    p.add_argument("table")
+    p.add_argument("--where", action="append")
+    p.add_argument("--fields")
+    p.add_argument("--sort", default="time")
+    p.add_argument("--desc", action="store_true")
+    p.add_argument("--page", type=int, default=1)
+    p = sub.add_parser("join", parents=[common])
+    p.add_argument("left")
+    p.add_argument("right")
+    p.add_argument("-i", action="store_true")
+    p.add_argument("--n", type=int, default=8)
     p = sub.add_parser("count", parents=[common])
     p.add_argument("target")
     p.add_argument("--where", action="append")
@@ -551,6 +690,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     handler = {"overview": cmd_overview, "profile": cmd_profile, "clusters": cmd_clusters,
                "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen,
-               "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count}[args.cmd]
+               "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count, "themes": cmd_themes,
+               "rows": cmd_rows, "join": cmd_join}[args.cmd]
     print(handler(idx, args))
     return 0

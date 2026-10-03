@@ -34,13 +34,15 @@ ATLAS_CACHE="${{ATLAS_CACHE:-/tmp/atlas-cache}}" PYTHONPATH="{ATLAS_HOME}" exec 
 TOOL_PROMPTS = {
     "atlas": (
         "\n\nYou also have `atlas`, a map of the log corpus (an `atlas` tool, also on PATH "
-        "in bash). Use it: start with `atlas overview` to see the corpus's structure, its "
-        "largest clusters of repeated records and its rarest, most unusual ones. Drill in "
-        "with `atlas expand`, `atlas grep` and `atlas show`, and run `atlas unseen` "
+        "in bash). Use it: start with `atlas overview` to see the corpus's structure. Its "
+        "themes show what is typical (topics shared by many records and actors); its rare "
+        "records, `atlas unseen` and `atlas entities` show what is unusual, and each rare "
+        "record says whether it belongs to a theme or is isolated. Drill in with "
+        "`atlas expand`, `atlas grep` and `atlas show`, and run `atlas unseen` "
         "periodically and before you finalise your report, to find salient records you have "
         "not looked at yet. For questions about one value or one field (who, when, how "
-        "often), use `atlas entities`, `atlas pivot` and `atlas count` before writing a "
-        "script. Plain shell tools remain available for anything atlas does not cover.\n"
+        "often), use `atlas entities`, `atlas pivot`, `atlas count`, `atlas rows` and "
+        "`atlas join` before writing a script. Plain shell tools remain available for anything atlas does not cover.\n"
     ),
 }
 
@@ -105,18 +107,24 @@ def atlas() -> Tool:
         under repetition. Start with `overview`. It is also on PATH in bash as `atlas`.
 
         Commands:
-          overview                       start here: files, guessed fields, biggest and most salient clusters
+          overview                       start here: files, fields, themes (what is typical), rare records
+          themes [--field T.F]           topics shared by many records and actors (tNN)
           profile [TABLE]                fields: roles, counts, top/rare values, time range and precision
           clusters [--field T.F] [--sort salience|size|time] [--page N]
-          expand ID                      open a cluster (cNN) or window (wNN): span, actors, varied examples
-          show REF [--offset N]          one row in full; REF = file:line or the record's own id
+          expand ID                      open a theme (tNN), cluster (cNN) or window (wNN): span, actors, examples
+          show REF [--offset N]          one row in full; REF = file:line, the record's own id, or a
+                                         cluster/theme id (its first record)
           grep PATTERN [-i] [--field T.F] [--page N]   regex search, hits grouped by cluster, rare hits first
-          unseen [--page N]              salient clusters you have not opened yet, plus coverage so far
+          unseen                         rare records not opened yet, new ones first (each call moves
+                                         on), plus unopened themes and coverage so far
           entities [--kind K] [--sort rare|count|first]   values to pivot on (field values, hosts, IPs,
                                          paths...), rarest first, with first/last seen and actors
           pivot VALUE [--exact]          every row in any file containing VALUE, as one timeline
           count TABLE[.FIELD] [--where F=V|F!=V|F~RE ...] [--by day|hour|FIELD]   filtered counts and
                                          group-bys, instead of writing a script
+          rows TABLE [--where ...] [--fields a,b] [--sort time|FIELD] [--desc]   matching rows, one
+                                         line each with their ids, instead of writing a script
+          join A.FIELD B.FIELD [-i]      which values of one field appear in another (overlap, examples)
 
         Refs like logs:120 are 1-based line numbers in the source file, so they stay valid in
         shell and python too; rows also show their own id field, which is best for citing.

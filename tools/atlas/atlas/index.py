@@ -16,6 +16,7 @@ from .entities import build_entities
 from .load import Table, data_files, load_dir
 from .profile import TableProfile, parse_time, profile_table
 from .signals import salience, signal_set, signal_weights
+from .themes import TopicIndex, build_topics
 
 WINDOW = 20  # rows per window
 TOP_SALIENT = 50  # coverage is reported against this many most salient small clusters
@@ -37,6 +38,9 @@ class Index:
     id_lookup: dict[str, tuple[str, int]] = field(default_factory=dict)  # record id value -> (table, row)
     entities: dict = field(default_factory=dict)  # (kind, value) -> EntityStat
     top_salient: list[str] = field(default_factory=list)  # ids of the most salient small clusters
+    topics: dict[tuple[str, str], TopicIndex] = field(default_factory=dict)  # (table, field) -> topics
+    themes: list = field(default_factory=list)  # Theme, across fields, in ranked order
+    cluster_themes: dict[str, list[str]] = field(default_factory=dict)  # cid -> theme ids containing it
 
     def native_id(self, table: str, row: int) -> str | None:
         f = self.profiles[table].id_field
@@ -127,6 +131,7 @@ def build_index(data_dir: Path, overrides: dict | None = None, use_cache: bool =
             clusters += cluster_field(name, f, t.rows, order)
     # Stable ids: by table, field, size (largest first), then first row.
     clusters.sort(key=lambda c: (c.table, c.field, -c.size, c.leader))
+    order_pos = {name: {r: k for k, r in enumerate(order)} for name, order in orders.items()}
     idx = Index(data_dir, tables, profiles, clusters, overrides=overrides, order=orders)
     for n, c in enumerate(clusters, 1):
         c.cid = f"c{n}"
@@ -152,6 +157,18 @@ def build_index(data_dir: Path, overrides: dict | None = None, use_cache: bool =
             bp = {ln for ln, n in lines.items() if n > 0.01 * len(vals) and len(ln) < 200}
             if bp:
                 idx.boilerplate[(name, f)] = bp
+    # Themes and topic words per text field (needs boilerplate, which snippets exclude).
+    for (table, fname), group in by_field.items():
+        ti = build_topics(idx, group, table, fname, len(idx.themes) + 1)
+        idx.topics[(table, fname)] = ti
+        for th in ti.themes:
+            idx.themes.append(th)
+            leaders = sorted((idx.by_id[cid].leader for cid in th.clusters), key=lambda r: order_pos[table][r])
+            unit = Cluster(table, fname, leaders, kind="theme")
+            unit.cid = th.tid
+            idx.by_id[th.tid] = unit
+            for cid in th.clusters:
+                idx.cluster_themes.setdefault(cid, []).append(th.tid)
     # Windows for tables where some text field barely compresses (e.g. one long transcript).
     for name in tables:
         fields = {}
