@@ -247,6 +247,68 @@ def build_prompt(
     return SYSTEM, prefix, report_md + tail
 
 
+# Finding rubrics whose sheets can be merged into one judge call per report. The TL;DR
+# rubrics are excluded on purpose: they must see only the summary, never the body.
+SINGLE_CALL_MODES = frozenset({"v2"})
+_REPORTS_DIVIDER = "\n---\n\n**Human incident report"
+_COUNT = re.compile(r"Score each of the \d+ points")
+_CONTRACT = re.compile(r"Return strict JSON only: .*", re.DOTALL)
+
+
+def build_single_prompt(
+    mode: str,
+    report_md: str,
+    templates: dict[str, str] | None = None,
+    variant: str | None = None,
+) -> tuple[str, str, str]:
+    """(system, prefix, suffix) for every sheet of `mode` at once: one judge call per report.
+
+    Assembled from the per-sheet templates at grading time, so it cannot drift from them:
+    the shared instructions once (with the point count updated), every sheet's points in
+    sheet order, the answer key and the report once, and a JSON contract listing every
+    claim id. Raises if a sheet no longer has the expected structure. Scores from this
+    prompt are not interchangeable with per-sheet grades; the grade records which was used.
+    """
+    if mode not in SINGLE_CALL_MODES:
+        raise ValueError(f"{mode!r} cannot be graded in a single call; supported: {sorted(SINGLE_CALL_MODES)}")
+    sets, loaded = load_sheets(mode, variant)
+    templates = templates or loaded
+    spec = MODES[mode]
+    ids = rubric_ids(mode)
+    claim_ids = [c["id"] for s in sets for c in s["claims"]]
+    header = reports = None
+    points: list[str] = []
+    for rid in ids:
+        template = templates[rid]
+        head, sep, rest = template.partition("\n## ")
+        body, divider, tail = ("## " + rest).partition(_REPORTS_DIVIDER)
+        if not sep or not divider or len(_COUNT.findall(head)) != 1:
+            raise ValueError(f"{mode}/{rid}: sheet structure changed; cannot merge it")
+        shared = _COUNT.sub("Score each of the K points", head.split("\n", 1)[1])
+        if header is None:
+            header, reports = shared, divider + tail
+        elif shared != header:
+            raise ValueError(f"{mode}/{rid}: shared instructions differ between sheets")
+        points.append(body.strip())
+    title = f"# Rubric {spec.prefix}1–{spec.prefix}{len(ids)} — {claim_ids[0]}–{claim_ids[-1]}"
+    contract = (
+        f'Return strict JSON only: {{"rubric_id": "{spec.prefix}", "items": [ {{"id": "<one of '
+        f'{", ".join(claim_ids)}>", "score": <0 to 1, one decimal place>, "quote": "<verbatim '
+        'snippet from the model report supporting the score, or empty>", "reason": "<one '
+        f'sentence>"}}, ... ] }} with exactly one item for each of the {len(claim_ids)} points.\n'
+    )
+    if len(_CONTRACT.findall(reports)) != 1:
+        raise ValueError(f"{mode}: sheet JSON contract changed; cannot merge it")
+    filled = (
+        title + "\n" + header.replace("Score each of the K points", f"Score each of the {len(claim_ids)} points")
+        + "\n".join(points) + "\n" + _CONTRACT.sub(lambda _m: contract, reports)
+    ).replace("{{HUMAN_REPORT}}", human_report(variant, mode))
+    prefix, sep, tail = filled.partition("{{MODEL_REPORT}}")
+    if not sep:
+        raise ValueError(f"{mode}: sheet has no {{{{MODEL_REPORT}}}} placeholder")
+    return SYSTEM, prefix, report_md + tail
+
+
 def extract_json(raw: str | None) -> dict | None:
     """Anthropic gives no response_format guarantee; strip fences/prose around the object."""
     if not raw:

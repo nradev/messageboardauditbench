@@ -233,3 +233,66 @@ async def test_judge_effort_is_recorded_per_sheet() -> None:
     )(state(), Target(""))
 
     assert {r["effort"] for r in score.metadata["grade"]["per_rubric"].values()} == {"medium"}
+
+
+def single_reply(mode: str, score: float, drop: set[str] = frozenset()) -> str:
+    sets, _ = core.load_sheets(mode)
+    items = [
+        {"id": c["id"], "score": score, "quote": "", "reason": "x"}
+        for s in sets for c in s["claims"] if c["id"] not in drop
+    ]
+    return json.dumps({"rubric_id": "V", "items": items})
+
+
+def test_single_prompt_carries_every_point_and_the_answer_key_once() -> None:
+    import re
+
+    system, prefix, suffix = core.build_single_prompt("v2", "THE REPORT")
+    sets, _ = core.load_sheets("v2")
+    claim_ids = [c["id"] for s in sets for c in s["claims"]]
+
+    assert re.findall(r"^## (N\d\d)", prefix, re.M) == claim_ids
+    assert prefix.count("**Human incident report (answer key):**") == 1
+    assert "Score each of the 38 points" in prefix
+    assert suffix.startswith("THE REPORT")
+    assert "exactly one item for each of the 38 points" in suffix
+    per_sheet = sum(len(core.build_prompt("v2", r, "x")[1]) for r in core.rubric_ids("v2"))
+    assert len(prefix) * 5 < per_sheet
+
+
+def test_single_prompt_refuses_the_tldr_rubric() -> None:
+    with pytest.raises(ValueError):
+        core.build_single_prompt("tldrh", "x")
+    with pytest.raises(ValueError):
+        sheet_scorer(rubric="tldrh", single_call=True)
+
+
+async def test_single_call_grades_every_sheet_in_one_call() -> None:
+    calls = []
+    reply = single_reply("v2", 0.7)
+
+    def nxt(*_args, **_kwargs) -> ModelOutput:
+        calls.append(1)
+        return ModelOutput(model="mockllm/model", completion=reply, usage=ModelUsage())
+
+    model = get_model("mockllm/model", custom_outputs=nxt)
+    score = await sheet_scorer(rubric="v2", judge=model, single_call=True)(state(), Target(""))
+
+    grade = score.metadata["grade"]
+    assert len(calls) == 1
+    assert grade["max"] == 38 and grade["accuracy"] == 0.7
+    assert grade["grading_calls"] == "single"
+    assert list(grade["per_rubric"]) == core.rubric_ids("v2")
+    assert "missing_claims" not in grade
+
+
+async def test_single_call_keeps_returned_claims_and_records_missing_ones() -> None:
+    reply = single_reply("v2", 1.0, drop={"N01", "N02", "N03", "N04", "N05", "N38"})
+    score = await sheet_scorer(rubric="v2", judge=judge([reply]), single_call=True)(
+        state(), Target("")
+    )
+
+    grade = score.metadata["grade"]
+    assert grade["max"] == 32
+    assert grade["missing_claims"] == ["N01", "N02", "N03", "N04", "N05", "N38"]
+    assert list(score.metadata["failures"]) == ["V1"]  # V8 kept its other claims
