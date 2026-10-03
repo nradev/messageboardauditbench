@@ -14,6 +14,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import coverage
+from .anomalies import cmd_anomalies
 from .cluster import Cluster
 from .fmt import (
     PAGE,
@@ -54,6 +55,8 @@ HELP = """atlas: a map of a log corpus. Compress first, expand on request.
   atlas rows TABLE [--where ...] [--fields a,b] [--sort time|FIELD] [--desc]
                                  matching rows, one line each, with their ids
   atlas timeline                 when activity starts, ends, peaks, changes level, goes quiet
+  atlas anomalies                look-alike identifiers (confusable characters), mixed-script
+                                 words, actor bursts, bursts of one repeated record
   atlas gapcheck [REPORT]        check a report against the data: Fix (unsupported citations and
                                  quotes) and Consider (optional coverage questions); --dismiss gID
   atlas join A.FIELD B.FIELD [-i]
@@ -194,9 +197,11 @@ def cmd_overview(idx: Index, args) -> str:
     if idx.windows:
         out.append(f"\nLow-redundancy tables (mostly unique rows) are also split into {len(idx.windows)} "
                    f"windows of consecutive rows: atlas clusters --windows")
+    out.append("\nCharacter-level and timing oddities that reading and ranking miss (look-alike names, "
+               "mixed-script words, bursts): atlas anomalies")
     best = next((c.cid for c in sorted(idx.clusters, key=lambda c: -c.score) if c.size <= 5), None)
     out.append("\n" + footer(f"atlas expand {themes[0].tid}" if themes else "", f"atlas expand {best}" if best else "",
-                             "atlas unseen", "atlas entities", "atlas grep PATTERN"))
+                             "atlas unseen", "atlas entities", "atlas anomalies", "atlas grep PATTERN"))
     coverage.record("overview", [], opened=opened, listed=listed)
     return "\n".join(out)
 
@@ -613,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
         print(HELP)
         return 0
     commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count",
-                "themes", "rows", "join", "timeline", "gapcheck", "records", "mark")
+                "themes", "rows", "join", "timeline", "gapcheck", "records", "mark", "anomalies")
     # Accept options before the command too (`atlas --data DIR overview`).
     first = next((i for i, a in enumerate(argv) if a in commands), None)
     if first:
@@ -664,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--case", action="store_true")
     p.add_argument("--page", type=int, default=1)
     sub.add_parser("timeline", parents=[common])
+    sub.add_parser("anomalies", parents=[common])
     p = sub.add_parser("gapcheck", parents=[common])
     p.add_argument("report", nargs="?")
     p.add_argument("--dismiss", nargs="+")
@@ -719,6 +725,6 @@ def main(argv: list[str] | None = None) -> int:
                "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen,
                "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count, "themes": cmd_themes,
                "rows": cmd_rows, "join": cmd_join, "timeline": cmd_timeline, "gapcheck": cmd_gapcheck,
-               "records": cmd_records, "mark": cmd_mark}[args.cmd]
+               "records": cmd_records, "mark": cmd_mark, "anomalies": cmd_anomalies}[args.cmd]
     print(handler(idx, args))
     return 0

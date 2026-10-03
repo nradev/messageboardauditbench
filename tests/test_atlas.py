@@ -398,3 +398,33 @@ def test_gapcheck_at_option_validation_and_prompt():
         _german_wiki_report(agent="react", gapcheck_at=0.6)  # needs tools=atlas
     with pytest.raises(ValueError):
         _german_wiki_report(agent="react", tools="atlas", gapcheck_at=1.5)
+
+
+def test_anomalies_find_lookalikes_mixed_scripts_and_bursts(tmp_path, monkeypatch, capsys):
+    lookalike = "admin_k\u0430rl"  # Cyrillic а (U+0430) in place of the Latin a
+    rows = [{"id": f"a{i}", "time": f"2026-01-{1 + i % 20:02d}T10:00:00Z", "user": "admin_karl",
+             "body": f"routine maintenance note number {i} for the wiki"} for i in range(60)]
+    rows += [{"id": f"b{i}", "time": "2026-01-15T11:00:00Z", "user": lookalike,
+              "body": f"edit made under a borrowed name {i}"} for i in range(3)]
+    rows.append({"id": "b9", "time": "2026-01-15T11:00:00Z", "user": "visitor",
+                 "body": f"signed as {lookalike} in the text"})
+    rows += [{"id": f"c{i}", "time": "2026-01-16T09:00:00Z", "user": "bot7", "body": f"automated ping {i}"}
+             for i in range(30)]  # a burst: one actor, one day
+    rows += [{"id": f"d{day}", "time": f"2026-01-{day:02d}T09:00:00Z", "user": "bot7", "body": "hello"}
+             for day in (2, 3, 4)]
+    d = tmp_path / "data"
+    d.mkdir()
+    with (d / "posts.jsonl").open("w") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    monkeypatch.setenv("ATLAS_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("ATLAS_STATE", str(tmp_path / "state.jsonl"))
+    assert cli.main(["anomalies", "--data", str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "'admin_karl' (posts.user" in out and f"look-alike '{lookalike}'" in out
+    assert "U+0430 CYRILLIC SMALL LETTER A" in out
+    assert "looks like 'admin_karl'" in out  # the mixed-script word in the text
+    assert "posts.user=bot7: 30 rows on 2026-01-16" in out
+    from atlas.anomalies import skeleton
+
+    assert skeleton("Fri\u0435drich") == skeleton("friedrich") and skeleton("M\u00fcller") != skeleton("Muller")

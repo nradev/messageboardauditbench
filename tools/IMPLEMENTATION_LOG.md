@@ -1116,3 +1116,181 @@ of reading independently of whether the agent chooses to call the tool.
 - Verified: a new test (hint text per arm, baseline message unchanged, the
   hint in both messages); full suite apart from the 2 pre-existing `node`
   failures; ruff clean.
+
+## 30-minute crew run vs atlas-30min (deeper analysis)
+
+`logs/crew-30min` (`atlas,crew`, `gapcheck_at=0.6`, `sweep_at_start`, the step 17
+nudges) against `logs/atlas-30min` and `logs/baseline-30min`; 2 epochs each.
+
+| arm | raw findings | coverage | TL;DR | combined |
+|---|---|---|---|---|
+| baseline-30min | 0.426 | 0.272 | 0.55 | 0.355 |
+| atlas-30min | 0.554 | 0.406 | 0.60 | 0.464 |
+| crew-30min | 0.566 | 0.432 | 0.60 | 0.482 |
+
+- **Coverage +0.026 is exactly one finding:** that the agents inferred a seeded
+  shuffle (N29). It was found in both crew runs via the sweep (in run 2 the
+  background digest delivered it at 4% of the budget) and in neither atlas
+  run. The other differences cancel out. Losses such as the June 22 drop
+  were in front of the agent (28 mentions in tool output) but left out of a
+  report at the 3,000-word cap (all six reports are at 2,988–2,999 words).
+- **Token cost, roughly double, comes from turns, not readers.**
+  - Reader input is 0.33–0.39M per run, about 1% of the agent's 41–55M.
+  - The agent took 263 and 241 turns against 154 and 129, with shorter turns
+    (median output 395–431 tokens against 526–604, latency 3.1–3.3 s against
+    3.9–5.7 s) and similar context per turn (median 191–215k against
+    185–190k).
+  - The baseline alone swings 155–328 turns. Under a wall-clock budget,
+    shorter or faster turns just mean more turns. This is evidence for the
+    token-budget note in `TOOL_IDEAS.md`.
+- **Usage went as planned:**
+  - background sweep, then 2–3 sweeps plus `ask` and `brief` (4 and 8 crew
+    calls);
+  - 560 and 659 records read, 92–94% of quotes verified;
+  - 12 of 33 and 33 of 57 cited records were read by readers, mostly
+    confirmed with `atlas show`.
+- **Why the gain was small (traced per missed finding):**
+  1. **Reach:** about 1.5% of 42k records were read. The records behind the
+     missed findings rank deep among rare records (tunnels from 812; the C
+     rewrite 1,380; the look-alike name 212; the ZZZ backup 104), and a
+     quarter of each sweep went to theme examples and repeated records that
+     atlas already shows.
+  2. **Truncation:** in crew run 2, readers were given 3 tunnel records whose
+     mention sits at character 1,521, just past the 1,500-character head
+     cut. They never saw it.
+  3. **Not findable by reading:** a Cyrillic look-alike letter needs a
+     confusables detector (`anomalies`, deferred).
+  4. **Seen but not reported:** the ZZZ backup and the deletion order
+     (selection and synthesis).
+  5. **Inference findings** score 0 in every arm (idea 4).
+  6. **Only about 25 of 423–558 verified notes per run reach the agent per
+     call** (the output cap).
+
+## Step 18: reader excerpts instead of head cuts; a deeper sweep
+
+**Excerpts (`records.py: record_text`, `excerpt`).**
+- A record over its budget is no longer cut at the head.
+- Short fields (≤200 chars) stay whole. Long values share the remaining
+  budget in proportion to their length.
+- In a long value:
+  - the first 2 lines stay for context;
+  - boilerplate lines and lines repeated within the record go;
+  - long single lines are split into pieces of about 240 chars, each scored
+    as its source line;
+  - the rest are ranked by line rarity × richness and kept in their original
+    order, with "[… n lines left out]" markers.
+- **Line rarity:** the number of clusters of that field containing the
+  (digit-normalised) line. Counting per cluster, not per value, keeps the
+  many versions of one page from making its lines look common.
+- **Richness:** (1 + content signals + length factor) × (1 + 2 × the IDF of
+  the rarest host, IP or path in the line).
+- A safety net cuts at `chars` if the text is still more than 300 chars
+  over (e.g. a record of many short fields).
+- **Check on the wiki data,** records whose rare detail lies past the old
+  head cut:
+  - tunnel mentions kept in 14 of 20;
+  - Cyrillic look-alike names kept in 3 of 3;
+  - ZZZ page names kept in 2 of 18 (they sit in very long link-list pages).
+
+  The 6 tunnel misses are later versions of a growing page, where the
+  excerpt prefers the lines new to that version, the intended generic
+  behaviour. I didn't tune further to these records.
+
+**Deeper sweep (`sweep_rows`).** The sweep now skips:
+- units the agent opened, as before;
+- units shown as listing lines (`listed`);
+- atlas's top-50 most salient rare records, which atlas's own listings exist
+  to show.
+
+So the crew complements atlas instead of repeating it, and this also
+applies to the background sweep that runs before the agent's first
+`overview`. New quotas:
+- windows up to half (narratives);
+- theme examples an eighth, 2 per theme, from clusters not shown;
+- rare records at least half (diversified);
+- repeated records a twentieth;
+- the rest spread over time.
+
+On the wiki, after `overview` and two `unseen` calls, 0 of the sweep's rare
+picks had been listed; before them, 38 of 105 were things atlas lists
+anyway. A warm sweep takes 1.2 s; the first call after a code change
+rebuilds the index, which the sandbox install does ahead of time.
+
+**Verified:**
+- 3 new or rewritten tests: a buried informative line kept, head context and
+  markers present, short fields whole, the safety net; the sweep skips listed
+  units; the sweep moves on, now with a long-tail corpus because atlas's top
+  50 is skipped. 22 crew tests, 50 with atlas; full suite apart from the 2
+  pre-existing `node` failures; ruff clean.
+- **Real reader check** (GLM 5.3, `wafer`):
+  - wiki: 105 rare, 20 spread, 18 theme, 7 repeated; 178/189 quotes verified
+    (94%); 41 s;
+  - Mythos 5: 73 rare, 60 window, 17 theme; 187/191 (98%); 29 s.
+- **New in the wiki digest:** a POST form auto-submitted from a script
+  labelled "xss chain"; a microlink `fetch` with an atob-decoded payload;
+  beacon plans with timing cutoffs; paired counter hits 2.4 s apart; an
+  independent reproduction of the Power BI claim.
+- **Still not reached:** the deepest items (tunnels rank 812+, the look-alike
+  admin name).
+
+## Step 19: `atlas anomalies`
+
+The plan's detectors from the start ("budgeted anomalies", "look-alike identifiers
+need a confusables skeleton"), built after the 30-minute analysis showed a
+character-level finding that no amount of reading can catch. Four detectors,
+each a capped list (8 items) with one example and a count:
+
+- **Look-alike identifiers.**
+  - Every short value (3–80 chars) of every non-text field, near-unique
+    fields included, plus extracted hosts, e-mails and paths, is reduced to
+    its Unicode TR39 confusable skeleton (NFKC, look-alikes mapped to the
+    ASCII they imitate, lower case).
+  - Groups with more than one raw value (not just case), a non-ASCII
+    character involved, and a plain-ASCII original in the corpus are listed,
+    an established value imitated by a rarer look-alike first.
+  - Each look-alike names its characters (e.g. "U+0435 CYRILLIC SMALL LETTER
+    IE for e").
+  - The table is vendored as `atlas/confusables.py`: 2,245 non-ASCII → ASCII
+    entries from Unicode confusables.txt v18.0.0, regenerated with
+    `tools/atlas/gen_confusables.py`. Atlas stays stdlib-only.
+- **Mixed-script tokens:** words mixing letters of several scripts, those
+  whose skeleton is a plain-ASCII word elsewhere in the corpus first ("looks
+  like 'friedrich1982'").
+- **Actor bursts:** an actor value with at least 20 rows on one day and at
+  least 3× what its typical share of that day's rows predicts (median share
+  over its active days).
+- **Record bursts:** at least 20 copies, and half of a repeated record's
+  copies, within one hour.
+
+**Design changes while building:**
+- Look-alike candidates first came from the entity index, which leaves out
+  near-unique fields. On the wiki, the plain original occurs once, in such a
+  field, so the group was missed. Now all short field values are compared.
+- The "looks like a plain word" check first used letters only, so a name with
+  digits never matched. Digits are now allowed.
+- Actor bursts first compared an actor's busiest day with its median day: 95
+  hits, nearly all the corpus's one peak day (every IP was "bursty").
+  Normalising by each day's total, against the actor's typical share, left 6
+  genuine spikes.
+
+**Results:**
+- wiki: 1 look-alike group (the plain `Friedrich1982` and its Cyrillic-е
+  version in labels, pages and revisions); 2 mixed-script tokens (the same
+  name); 6 actor bursts; 21 record bursts (copy floods on the peak day);
+  3.8 s warm;
+- Mythos 5: 0 look-alikes, 1 mixed-script token, 1 record burst;
+- RubyHack: nothing.
+
+**Surfacing:** a line in `overview` ("character-level and timing oddities
+that reading and ranking miss … atlas anomalies"), the footer, the atlas tool
+description and the atlas prompt paragraph (another small change to the atlas
+condition).
+
+**Not built:** "odd naming patterns" (e.g. runs of names sharing an unusual
+prefix) and "same name from unusual network origins". Both need more
+false-positive work, and I don't want a detector shaped by findings we know.
+
+**Verified:** a new atlas test (look-alike group with the named character, a
+disguised mixed-script word, a relative burst, skeleton equalities and
+non-equalities); a mock run in the real sandbox; full suite apart from the 2
+pre-existing `node` failures; ruff clean.

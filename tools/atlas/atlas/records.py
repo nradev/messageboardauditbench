@@ -7,44 +7,171 @@ A SET is one of:
   rows:TABLE             rows of one file, filtered with --where (same syntax as `atlas rows`)
   around:REF             rows next to REF in the same file, in time order (--n per side)
   refs:REF,REF,...       exactly these rows (file:line or record ids)
-  sweep                  the corpus's most informative records not read or opened yet:
-                         examples of each theme, the most salient rare records (diverse),
-                         the most repeated records, and (for low-redundancy files) the most
-                         salient windows; each record says why it was picked. Calling it
-                         again moves on, since records read by readers are left out.
+  sweep                  the corpus's most informative records the agent has not read,
+                         opened or been shown in a listing: mostly salient rare records
+                         (diverse), a few theme examples and repeated records, and (for
+                         low-redundancy files) the most salient windows; each record says
+                         why it was picked. Calling it again moves on, since records read
+                         by readers are left out.
 
 Near-duplicates are read once: rows of the same cluster collapse to one representative
 with a count. When a set is larger than --limit, up to a third of the picks are the most
 repeated groups (what is typical), up to a third the most salient (what is unusual), and
-the rest are spread evenly over time; picks are returned in time order. Each record's text holds every non-empty field, capped at --chars.
+the rest are spread evenly over time; picks are returned in time order.
+
+Each record's text holds every non-empty field within --chars. A record too long for that
+is excerpted, not cut at the head: short fields are kept whole, and long values keep their
+first lines for context plus the most informative of the rest (lines rare in that field,
+with content signals such as hosts, paths, commands, code), in their original order, with
+markers where lines were left out. Boilerplate lines and lines repeated within the record
+are dropped first. Detail buried deep in a long record can then still reach a reader.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
+from collections import Counter
 
 from . import coverage
 from .fmt import fmt_time, ref, ref_id
 from .index import Index
 from .query import _parse_where
+from .signals import signal_set
 
 DEFAULT_LIMIT = 60
 DEFAULT_CHARS = 1500
-FIELD_CHARS = 1200  # one long value cannot crowd out the rest of the record
+SHORT_FIELD = 200  # values up to this long are kept whole
+HEAD_LINES = 2  # first lines of a long value, always kept for context
+PIECE = 240  # long single lines are split into pieces of about this many characters
+_LINE_FREQ: dict[tuple[str, str], Counter] = {}  # (table, field) -> line counts, built on demand
+
+
+def _flat_value(v) -> str:
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v)
+    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+
+
+def _norm_line(line: str) -> str:
+    return re.sub(r"\d+", "0", line.strip().lower())[:200]
+
+
+def _line_freq(idx: Index, table: str, field: str) -> Counter:
+    """In how many clusters of a field each (digit-normalised) line occurs. Counting per
+    cluster, not per value, keeps the many versions of one page or message from making
+    its lines look common."""
+    key = (table, field)
+    if key not in _LINE_FREQ:
+        by_unit: dict[str, set[str]] = {}
+        for i, r in enumerate(idx.tables[table].rows):
+            v = r.get(field)
+            if isinstance(v, str) and "\n" in v:
+                unit = idx.row_cluster.get((table, field, i), f"row{i}")
+                by_unit.setdefault(unit, set()).update(_norm_line(x) for x in v.splitlines() if x.strip())
+        cnt: Counter = Counter()
+        for lines in by_unit.values():
+            cnt.update(lines)
+        _LINE_FREQ[key] = cnt
+    return _LINE_FREQ[key]
+
+
+def _entity_rarity(idx: Index, line: str) -> float:
+    """0..1: how rare the rarest host, IP or path in the line is across the corpus (IDF over
+    rows; 0 when the line names none)."""
+    from .entities import IPV4, PATH, hosts
+
+    n = sum(len(t.rows) for t in idx.tables.values()) or 1
+    best = 0.0
+    names = [("host", h) for h in hosts(line)] + [("ip", m.group(0)) for m in IPV4.finditer(line)]
+    names += [("path", m.group(0)) for m in PATH.finditer(line)]
+    for kind, value in names:
+        stat = idx.entities.get((kind, value))
+        rows = stat.rows if stat else 1
+        best = max(best, math.log(n / max(rows, 1)) / math.log(n) if n > 1 else 0.0)
+    return best
+
+
+def _pieces(text: str) -> list[tuple[str, str]]:
+    """(piece, normalised source line): long lines are split into pieces of about PIECE
+    characters, each scored as its source line."""
+    out = []
+    for line in text.splitlines():
+        src = _norm_line(line)
+        while len(line) > PIECE * 1.5:
+            cut = line.rfind(" ", PIECE // 2, PIECE)
+            cut = cut if cut > 0 else PIECE
+            out.append((line[:cut], src))
+            line = line[cut:].lstrip()
+        out.append((line, src))
+    return out
+
+
+def excerpt(idx: Index, table: str, field: str, text: str, budget: int) -> str:
+    """The value within ``budget`` characters: its first lines, then the most informative
+    other lines (rare in this field, with content signals), in original order."""
+    if len(text) <= budget:
+        return text
+    pieces = _pieces(text)
+    lines = [p for p, _ in pieces]
+    bp = idx.boilerplate.get((table, field), set())
+    freq = _line_freq(idx, table, field)
+    seen: set[str] = set()
+    cands = []  # (score, index)
+    for k, (line, src) in enumerate(pieces):
+        n = _norm_line(line)
+        if not n or line.strip() in bp or n in seen:
+            continue
+        seen.add(n)
+        if k < HEAD_LINES:
+            cands.append((math.inf, k))
+            continue
+        rarity = 1.0 / (1.0 + math.log1p(max(freq.get(src, 1) - 1, 0)))
+        richness = (1.0 + len(signal_set(line)) + min(len(n), 120) / 120) * (1.0 + 2.0 * _entity_rarity(idx, line))
+        cands.append((rarity * richness, k))
+    keep, used = set(), 0
+    for _score, k in sorted(cands, key=lambda c: (-c[0], c[1])):
+        cost = len(lines[k]) + 1
+        if used + cost > budget:
+            continue
+        keep.add(k)
+        used += cost
+    out, gap = [], 0
+    for k, line in enumerate(lines):
+        if k in keep:
+            if gap:
+                out.append(f"[… {gap} lines left out]")
+                gap = 0
+            out.append(line)
+        elif line.strip():
+            gap += 1
+    if gap:
+        out.append(f"[… {gap} lines left out]")
+    return "\n".join(out)
 
 
 def record_text(idx: Index, table: str, row: int, chars: int) -> str:
+    """Every non-empty field within ``chars``: short fields whole, long values excerpted
+    with the remaining budget shared in proportion to their length."""
+    items = [(k, _flat_value(v)) for k, v in idx.tables[table].rows[row].items() if v not in (None, "", [])]
+    whole = sum(len(k) + len(v) + 2 for k, v in items)
+    if whole <= chars:
+        return "\n".join(f"{k}: {v}" for k, v in items)
+    short = [(k, v) for k, v in items if len(v) <= SHORT_FIELD]
+    long_ = [(k, v) for k, v in items if len(v) > SHORT_FIELD]
+    left = max(chars - sum(len(k) + len(v) + 2 for k, v in short), 300 * max(1, len(long_)))
+    total_long = sum(len(v) for _, v in long_) or 1
     parts = []
-    for k, v in idx.tables[table].rows[row].items():
-        if v in (None, "", []):
-            continue
-        s = ", ".join(str(x) for x in v) if isinstance(v, list) else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-        if len(s) > FIELD_CHARS:
-            s = s[:FIELD_CHARS] + f" … [+{len(s) - FIELD_CHARS:,} chars]"
-        parts.append(f"{k}: {s}")
+    for k, v in items:
+        if len(v) <= SHORT_FIELD:
+            parts.append(f"{k}: {v}")
+        else:
+            budget = max(200, int(left * len(v) / total_long))
+            parts.append(f"{k}: " + (excerpt(idx, table, k, v, budget) if len(v) > budget else v))
     text = "\n".join(parts)
-    return text if len(text) <= chars else text[:chars] + " … [truncated]"
+    # Safety net (e.g. a record of many short fields): never far beyond the budget.
+    return text if len(text) <= chars + 300 else text[:chars] + " … [truncated]"
 
 
 def _group_key(idx: Index, table: str, row: int) -> str:
@@ -171,18 +298,23 @@ def select(idx: Index, rows: list[tuple[str, int]], mode: str, limit: int) -> li
 
 
 SWEEP_THEMES = 12  # themes sampled per sweep
-SWEEP_PER_THEME = 3
+SWEEP_PER_THEME = 2
 
 
 def sweep_rows(idx: Index, limit: int) -> list[tuple[str, int, str]]:
-    """(table, row, why) for a sweep of up to ``limit`` records not yet read or opened:
-    about a quarter theme examples, at least a third salient rare records (diversified),
-    a tenth the most repeated records, windows for low-redundancy files, the rest spread
-    over time. Grouped by source, so a reader's batch is coherent."""
+    """(table, row, why) for a sweep of up to ``limit`` records the agent has not read,
+    opened or been shown in a listing, skipping atlas's most salient rare records (its own
+    listings show those): windows for low-redundancy files (up to half), a few
+    theme examples (an eighth), mostly salient rare records (diversified; at least half),
+    a twentieth the most repeated records, the rest spread over time. Grouped by source,
+    so a reader's batch is coherent."""
     from .cli import is_trivial  # cli imports this module
 
-    opened, seen_rows, _listed = coverage.load()
+    opened, seen_rows, listed = coverage.load()
     done = coverage.load_read() | seen_rows
+    # Units the agent has seen (opened, or as a listing line), plus atlas's most salient rare
+    # records, which `overview` and `unseen` exist to show: the crew complements atlas.
+    shown = opened | listed | set(idx.top_salient)
     picked: list[tuple[str, int, str]] = []
     have: set[tuple[str, int]] = set()
 
@@ -204,12 +336,14 @@ def sweep_rows(idx: Index, limit: int) -> list[tuple[str, int, str]]:
                 break
             for r in w.members:
                 add(w.table, r, f"window {w.cid}")
-    # Theme examples: the most typical cluster, the largest and the most salient one.
-    theme_quota = len(picked) + limit // 4
+    # Theme examples (a few, from clusters not shown yet): the most typical cluster, the
+    # largest and the most salient one. Atlas's overview already shows what themes are about.
+    theme_quota = len(picked) + limit // 8
     for th in sorted(idx.themes, key=lambda t: (-t.actors, -t.rows))[:SWEEP_THEMES]:
         members = [idx.by_id[c] for c in th.clusters]
         cands = [idx.by_id[th.example]] if th.example in idx.by_id else []
         cands += sorted(members, key=lambda c: -c.size)[:2] + sorted(members, key=lambda c: -c.score)[:2]
+        cands = [c for c in cands if c.cid not in shown]
         n = 0
         for c in cands:
             r = first_new(c)
@@ -218,8 +352,10 @@ def sweep_rows(idx: Index, limit: int) -> list[tuple[str, int, str]]:
     # The most salient rare records, diversified so they are not variants of one topic.
     from .fmt import diversify
 
-    rare_quota = len(picked) + max(limit // 3, (limit - len(picked)) * 2 // 3)
-    small = [c for c in idx.clusters if c.size <= 5 and c.cid not in opened and not is_trivial(idx, c)]
+    # Rare records the agent has not been shown in any listing: the sweep goes past what
+    # atlas already put in front of it, into the long tail.
+    rare_quota = len(picked) + max(limit // 2, (limit - len(picked)) * 4 // 5)
+    small = [c for c in idx.clusters if c.size <= 5 and c.cid not in shown and not is_trivial(idx, c)]
     for c in diversify(idx, sorted(small, key=lambda c: -c.score)):
         if len(picked) >= rare_quota:
             break
@@ -227,8 +363,9 @@ def sweep_rows(idx: Index, limit: int) -> list[tuple[str, int, str]]:
         if r is not None:
             add(c.table, r, f"rare {c.cid}")
     # The most repeated records (what most of the corpus says).
-    rep_quota = len(picked) + max(1, limit // 10)
-    for c in sorted((c for c in idx.clusters if c.size > 5 and not is_trivial(idx, c)), key=lambda c: -c.size):
+    rep_quota = len(picked) + max(1, limit // 20)
+    for c in sorted((c for c in idx.clusters if c.size > 5 and c.cid not in shown and not is_trivial(idx, c)),
+                    key=lambda c: -c.size):
         if len(picked) >= rep_quota:
             break
         r = first_new(c)

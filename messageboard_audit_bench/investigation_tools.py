@@ -37,7 +37,8 @@ TOOL_PROMPTS = {
         "\n\nYou also have `atlas`, a map of the log corpus (an `atlas` tool, also on PATH "
         "in bash). Use it: start with `atlas overview` to see the corpus's structure. Its "
         "themes show what is typical (topics shared by many records and actors); its rare "
-        "records, `atlas unseen` and `atlas entities` show what is unusual, and each rare "
+        "records, `atlas unseen`, `atlas entities` and `atlas anomalies` (look-alike names, "
+        "mixed-script words, bursts) show what is unusual, and each rare "
         "record says whether it belongs to a theme or is isolated. Drill in with "
         "`atlas expand`, `atlas grep` and `atlas show`, and run `atlas unseen` "
         "periodically and before you finalise your report, to find salient records you have "
@@ -50,9 +51,9 @@ TOOL_PROMPTS = {
     ),
     "crew": (
         "\n\nYou also have `crew`, a reading crew. Within your budget you can read only a small "
-        "part of the corpus yourself; the crew's readers read 60 to 150 records in parallel in "
-        "about 15 to 30 seconds, outside your turns, which would take you dozens of turns. They "
-        "return short notes, each with a record ref and an exact quote checked against the "
+        "part of the corpus yourself; the crew's readers read 60 to 150 records in parallel "
+        "outside your turns — not instantly, but far faster than the dozens of turns reading "
+        "them yourself would take. They return short notes, each with a record ref and an exact quote checked against the "
         "record. Use it whenever reading more would change your account: `crew sweep` early "
         "on, for a cross-section of the corpus beyond what atlas lists (each call moves on to "
         "records not read yet); `crew brief SET` to understand a theme, cluster or event in "
@@ -188,6 +189,8 @@ def atlas() -> Tool:
                                          line each with their ids, instead of writing a script
           join A.FIELD B.FIELD [-i]      which values of one field appear in another (overlap, examples)
           timeline                       when activity starts, ends, peaks, changes level, goes quiet
+          anomalies                      look-alike identifiers (confusable characters, e.g. a Cyrillic
+                                         letter in a name), mixed-script words, actor and record bursts
           gapcheck [REPORT]              check your report against the data: Fix (citations or quotes
                                          the data does not support) and Consider (optional coverage
                                          questions; leave out what is immaterial); --dismiss gID
