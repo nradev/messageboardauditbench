@@ -6,7 +6,7 @@ results were run at German wiki report version `6.1` (labelled `6-B` at the time
 
 | benchmark | Inspect task | current version | storage id |
 |---|---|---:|---|
-| German wiki report | `german_wiki_report` | `12.0` | `messageboard` |
+| German wiki report | `german_wiki_report` | `12.1` | `messageboard` |
 | Transluce report | `transluce_report` | `1.0` | `urlquery` |
 
 The storage id is what run records, configs and grade files write as `benchmark_id`. It
@@ -85,6 +85,7 @@ B is minor 1. Each tag points at the last commit that carried its version.
 | `10.0` | `10-A` | `german-wiki-report-v10.0` | The shared runtime changes merged with the Transluce report (below). Also the task rename and version flag, which do not change behaviour. |
 | `11.0` | | not yet tagged | The default judge is Claude Opus 5.5, and the `blind-tokens` output-token budget is added (below). |
 | `12.0` | | not yet tagged | Native ReAct tools use the standard schema except for OpenAI models routed through OpenRouter (below). |
+| `12.1` | | not yet tagged | Faster grading: concurrent sheets and an optional judge effort (below). |
 
 The archived logs provide the direct evidence for the LessWrong run version: the
 `task_version` field is `6-B` in the local round 4, followup, and provider-swap cohorts.
@@ -148,6 +149,15 @@ sees Inspect's standard one (`command` and `path` required). Each ReAct sample r
 `react_tool_schema` (`all_required` or `standard`). ReAct results at `12.0` are not
 comparable with earlier versions for models that omit nullable arguments; CLI scaffolds
 are unaffected.
+
+**`12.1`.** The sheet scorer grades a report's sheets concurrently instead of one after
+another, combining them in sheet order, so default grades are unchanged. A new
+`judge_effort` option (on the audit and grading tasks, `--judge-effort` on
+`run_inspect_matrix.sh`, and `scripts/grade_staged.sh`, which runs the findings and TL;DR
+sheets together) sets the judge's starting effort; the default stays `xhigh`. On three
+DeepSeek V4.1 Flash reports, GPT-6.1 Sol at `medium` matched its `xhigh` grades to within
+0.011 combined (88% of finding scores within 0.1) at a fifth of the cost, and the batch
+took 31 s instead of about 10 minutes. Compare only grades made at the same effort.
 
 For a short while on 2026-09-28 the code said `10-A`, with the old task name and
 identical behaviour.
