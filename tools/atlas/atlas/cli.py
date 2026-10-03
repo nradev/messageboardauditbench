@@ -46,7 +46,7 @@ HELP = """atlas: a map of a log corpus. Compress first, expand on request.
   atlas entities [--kind K] [--sort rare|count|first]
                                  values to pivot on (field values, hosts, IPs, paths...), rare first
   atlas pivot VALUE [--exact]    every row in any file containing VALUE, as one timeline
-  atlas count TABLE[.FIELD] [--where F=V|F!=V|F~RE ...] [--by day|hour|FIELD]
+  atlas count TABLE[.FIELD] [--where F=V|F!=V|F~RE|F>V|F<V|F>=V|F<=V ...] [--by day|hour|FIELD]
                                  filtered counts and group-bys, no scripting needed
   atlas rows TABLE [--where ...] [--fields a,b] [--sort time|FIELD] [--desc]
                                  matching rows, one line each, with their ids

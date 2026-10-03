@@ -497,3 +497,142 @@ log corpus, and exercised on the wiki, Mythos 5 (one transcript) and RubyHack
   ruff clean; full suite only the 2 pre-existing failures; real-sandbox mock
   run calling overview, expand c/t, pivot, show c3939, rows, join, unseen ×2,
   count, grep — all recorded in `atlas_coverage`.
+
+## Step 10: early-submit loop (`-T policy_aware_continue=true`)
+
+- **Cause.** In every run with data, both conditions: the agent finishes its
+  report early and calls `submit`; the harness refuses it (minimum-runtime
+  rule, 75% of the budget); the agent works briefly, stops calling tools, and
+  Inspect's default `react` nudge ("If you believe you have completed the
+  task, please call the `submit()` tool") invites another early submit.
+  Refusals per run: atlas 5 / 8 / 7, baseline 8 (the sample that failed);
+  default nudges 1–5 per run. One atlas run was one early submit away from
+  failing too.
+- **Option `policy_aware_continue` (task parameter, react + inspect only, off
+  by default):**
+  1. `react` gets an `on_continue` hook (`native.policy_aware_continue`).
+     Before the earliest acceptable finish, a turn without tool calls gets
+     "About N seconds remain before the evaluation will accept completion.
+     Keep investigating with your tools …" with no mention of submit; turns
+     with tool calls and everything after the earliest finish use Inspect's
+     default behaviour unchanged.
+  2. Reaching the early-completion cap (8) accepts the report and records
+     `minimum_runtime_violation: true` instead of raising.
+  Generic: independent of the model, of atlas and of the dataset; both
+  conditions get it. Recorded as `policy_aware_continue` in sample metadata.
+  It is a harness deviation from round 4, so pilot results are comparable to
+  each other, not exactly to the published numbers.
+- Verified: unit tests for the hook (early message without "submit", default
+  with tool calls and after the earliest finish) and for the option's
+  validation and metadata; a mock run in the real sandbox with 12 immediate
+  submits ended `success` with `minimum_runtime_violation: true`, and the
+  replacement nudge appeared. `RUN.md` adds the option to both commands;
+  `usage_metrics.py` prints violations.
+
+## Pilot 4: atlas after step 9 (unseen that moves on, rows, join, show cNN), provider pinned
+
+Log: `logs/atlas-pilot4/2026-10-03T11-27-18-…33S47WZ3KAq6XGEqsDrFb8.eval` (GLM 5.3,
+10 min, judge gpt-6.1-sol, OpenRouter pinned to `inference-net`, no
+`policy_aware_continue`; comparable with pilot 3, not with runs using the
+option).
+
+| run | raw findings | coverage | TL;DR | combined | model calls | atlas share |
+|---|---|---|---|---|---|---|
+| e1 | 0.421 | 0.284 | 0.6 | 0.379 | 23 | 51% |
+| e2 | 0.468 | 0.342 | 0.6 | 0.419 | 20 | 41% |
+| e3 | 0.279 | 0.168 | 0.7 | 0.328 | 19 | 43% |
+| mean | 0.389 | 0.265 | 0.63 | 0.375 | | |
+| mean e1–e2 | 0.445 | 0.313 | 0.60 | 0.399 | | |
+| pilot 3 mean | 0.446 | 0.314 | 0.53 | 0.380 | 78–80 | 7–21% |
+
+- **The provider pin dominated this pilot.** Median model call 8.4–12.6s
+  (spikes 67–163s) vs 3.7s unpinned, so ~20 model calls in 10 minutes instead
+  of ~79: the agent got about a quarter of the turns. The pin also did not
+  improve caching (cache share of input 44–68% vs ~85%). e3 hit a 429
+  ("temporarily rate-limited upstream") and a cancelled call at the deadline,
+  so its report is a 220-word stub; its low score is infrastructure, not
+  atlas.
+- **Tool changes were used as intended, with no atlas errors:** atlas was
+  41–51% of tool calls; `unseen` showed 23–31 of the 50 most salient rare
+  records (the counter that never moved before); `show cNN` used 9 times
+  without rejections; `rows`, `pivot`, `count` used in every run.
+- **Scores cannot judge the fixes:** with a quarter of the turns, the two
+  complete runs matched pilot 3 (combined 0.399 vs 0.380, raw 0.445 vs 0.446)
+  — suggestive that each turn yielded more, but the backend changed, so this
+  is not evidence either way.
+- Next: provider switched to `wafer` (pinned, no fallback) in both `RUN.md`
+  commands, to test whether a different pinned provider keeps call latency
+  near the unpinned ~3.7s median.
+
+## Pilot 5: atlas, provider `wafer`, `policy_aware_continue=true`
+
+Log: `logs/atlas-pilot5/2026-10-03T11-56-56-…SKofYeGMDKvka8YJ9AAQQ4.eval` (GLM 5.3,
+10 min, judge gpt-6.1-sol). Pairs with a baseline run under the same settings.
+
+| run | raw findings | coverage | TL;DR | combined | model calls | atlas share | bash calls |
+|---|---|---|---|---|---|---|---|
+| e1 | 0.500 | 0.363 | 0.6 | 0.434 | 34 | 59% | 2 |
+| e2 | 0.429 | 0.305 | 0.7 | 0.424 | 26 | 32% | 14 |
+| e3 | 0.482 | 0.353 | 0.5 | 0.397 | 25 | 53% | 5 |
+| **mean** | **0.470** | **0.340** | **0.60** | **0.418** | | | |
+| pilot 3 mean (unpinned, no option) | 0.446 | 0.314 | 0.53 | 0.380 | 78–80 | 7–21% | 25–48 |
+
+- **Provider `wafer`:** median call 10–12s (max ~90s), so 25–34 model calls in
+  10 min (about a third of unpinned), but no errors and 83–92% of input from
+  the prompt cache. Slow like `inference-net`, but stable.
+- **Early-submit loop gone:** 1–2 refused early completions per run, no
+  policy nudges needed, no violations; all reports 2,879–2,931 words.
+- **atlas replaced scripting:** 32–59% of tool calls; bash fell to 2–14 calls
+  (25–48 in pilot 3). `rows` (1–11 per run) and `count` (1–5) carried the
+  queries agents used to script; `unseen` showed 29–32 of the 50 most salient
+  rare records.
+- **One atlas error:** `rows --where "n_revs_before>0"` (numeric comparisons
+  are not supported; only `=`, `!=`, `~`).
+- Per-finding shifts vs pilot 3 are mixed (network-bypass findings up,
+  deletion-reaction and heartbeat findings down); with 3 runs per side a
+  single finding moving 0 ↔ 1 is within noise, and tuning to them would be
+  overfitting, so they are recorded, not acted on.
+- Scores are the best and most consistent of the atlas pilots, but the
+  provider and the option both changed since pilot 3, so only the paired
+  baseline (same provider, same option) can attribute anything to atlas.
+
+## Step 11: ordered comparisons in `--where` (atlas version after pilot 5)
+
+- `rows` / `count` `--where` now also take `F>V`, `F<V`, `F>=V`, `F<=V`:
+  numeric when both sides parse as numbers (so `n>9` matches `"10"`),
+  otherwise text order, which also orders ISO timestamps
+  (`time>=2026-06-18`). Missing values never match. Prompted by the one atlas
+  error in pilot 5 (`rows pages --where "n_revs_before>0"`); a basic generic
+  filter. Checked on the wiki (17 pages with prior revisions) and RubyHack.
+- Runs after this change use a newer atlas than pilot 5; pilot 5 stays the
+  reference paired with `logs/atlas-baseline5`.
+
+## Paired comparison: pilot 5 (atlas) vs baseline 5
+
+Both: GLM 5.3, react, 10 min, `policy_aware_continue=true`, OpenRouter pinned
+to `wafer`, judge gpt-6.1-sol, 3 epochs; no errors or violations on either
+side. Baseline log: `logs/atlas-baseline5/2026-10-03T12-52-26-…dDDi3gPBvxQBWpxkDkNrB5.eval`.
+
+| | raw findings | coverage | TL;DR | combined |
+|---|---|---|---|---|
+| atlas | 0.500 / 0.429 / 0.482 → **0.470** | 0.363 / 0.305 / 0.353 → **0.340** | 0.6 / 0.7 / 0.5 → **0.60** | 0.434 / 0.424 / 0.397 → **0.418** |
+| baseline | 0.337 / 0.389 / 0.413 → **0.380** | 0.258 / 0.311 / 0.368 → **0.312** | 0.6 / 0.6 / 0.6 → **0.60** | 0.361 / 0.397 / 0.438 → **0.399** |
+| difference (Welch t, 3 vs 3) | +0.090 (t≈2.9) | +0.028 (t≈0.8) | 0 | +0.020 (t≈0.8) |
+
+- **atlas broadens what the report touches, not (yet) how fully.** Findings
+  scored 0: atlas 11 / 14 / 11, baseline 20 / 19 / 19. Partially credited
+  (0.1–0.7): atlas 13 / 13 / 14, baseline 8 / 7 / 5. Fully credited (≥0.8):
+  atlas 14 / 11 / 13, baseline 10 / 12 / 14. The raw-findings ranges do not
+  overlap (worst atlas 0.429 > best baseline 0.413); coverage and combined,
+  which give no credit at ≤0.5, are within noise.
+- **Where:** the largest gains are one storyline found in the long tail —
+  the network bypass (sharing techniques 0.20 → 0.90, /etc/hosts mapping
+  0 → 0.90, NO_PROXY exception 0 → 0.67, GET-only 0.23 → 0.77, who worked it
+  out 0 → 0.47, who reproduced it 0 → 0.40). Two findings fell (activity drop
+  ~22 June 1.00 → 0.70; writing to the internet via GET 0.77 → 0.27).
+- **Confound: turns.** Same provider, but median model call 10–12s for the
+  atlas runs vs 6.4–6.8s for the baseline, so 25–34 vs 34–41 model calls. The
+  two arms ran an hour apart, so provider load may differ; per-call input
+  sizes were similar (~45k tokens). Run the arms simultaneously next time.
+- Cost: similar token totals (input+cache 1.1–1.9M per run on both sides;
+  atlas used fewer output tokens, 24k vs 28–34k, with fewer calls).

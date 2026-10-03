@@ -295,6 +295,7 @@ def _audit_task(
     extra_task_metadata: dict | None = None,
     allow_drafts: bool = False,
     tools: str | None = None,
+    policy_aware_continue: bool = False,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -332,6 +333,8 @@ def _audit_task(
     investigation_tools = parse_tools(tools)
     if investigation_tools and (agent != "react" or backend != "inspect"):
         raise ValueError("tools= is only supported with agent=react and backend=inspect")
+    if policy_aware_continue and (agent != "react" or backend != "inspect"):
+        raise ValueError("policy_aware_continue is only supported with agent=react and backend=inspect")
     budget_min = _time_limit(time_limit_minutes, int(cfg["budget_min"]))
     runtime_fraction = _min_runtime_fraction(min_runtime_fraction)
     minimum_runtime_seconds = runtime_policy.minimum_runtime_seconds(
@@ -363,6 +366,8 @@ def _audit_task(
         "report_accept_max_words": acceptance_limits(cfg)[1],
         **(extra_sample_metadata or {}),
     }
+    if policy_aware_continue:
+        sample_metadata["policy_aware_continue"] = True
     if investigation_tools:
         sample_metadata["investigation_tools"] = list(investigation_tools)
         sample_metadata["investigation_tools_prompt"] = prompt_addendum(investigation_tools)
@@ -385,6 +390,7 @@ def _audit_task(
             min_runtime_fraction=runtime_fraction,
             codex_features_off=URLQUERY_CODEX_FEATURES_OFF if benchmark_id == "urlquery" else (),
             investigation_tools=investigation_tools,
+            policy_aware_continue_enabled=policy_aware_continue,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -462,6 +468,7 @@ def _german_wiki_report(
     data_variant: str | None = None,
     version: str | None = None,
     tools: str | None = None,
+    policy_aware_continue: bool = False,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -491,6 +498,11 @@ def _german_wiki_report(
             ``scripts/run_eval.py --version`` to run another one.
         tools: Comma-separated investigation tools for ``agent=react`` (currently
             ``atlas``; see ``tools/``). Default none, which is the published condition.
+        policy_aware_continue: For ``agent=react``: before the earliest acceptable
+            finish, replace Inspect's "call submit()" continue nudge with one that does
+            not invite submitting, and accept the report (flagging
+            ``minimum_runtime_violation``) instead of failing the sample when the
+            early-completion cap is reached. Default off, the published condition.
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -507,6 +519,7 @@ def _german_wiki_report(
         data_variant=data_variant,
         scorers=_scorers(judge, rubric, variant),
         tools=tools,
+        policy_aware_continue=policy_aware_continue,
     )
 
 
@@ -546,6 +559,7 @@ def _transluce_report(
     article_context: str | None = None,
     version: str | None = None,
     tools: str | None = None,
+    policy_aware_continue: bool = False,
 ) -> Task:
     """Run one sandboxed Transluce report trial on the pinned urlquery.net snapshot.
 
@@ -577,6 +591,7 @@ def _transluce_report(
         min_runtime_fraction=min_runtime_fraction,
         data_variant=None,
         tools=tools,
+        policy_aware_continue=policy_aware_continue,
         scorers=[
             finding_scorer(judge=judge, effort=judge_effort, article_context=article_context),
             process_metrics(),

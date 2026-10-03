@@ -177,6 +177,32 @@ def _with_react_feedback(base: Tool, env: dict[str, str]) -> Tool:
     ).as_tool()
 
 
+def policy_aware_continue(earliest_finish_epoch: int, clock=time.time):
+    """``react`` on_continue hook that respects the minimum-runtime policy.
+
+    Inspect's default nudge, sent whenever the model stops calling tools, invites it to
+    call ``submit()``. Before the earliest acceptable finish that invitation only produces
+    a refused early completion. Until then this hook sends a continue message that does
+    not mention submitting; afterwards it defers to Inspect's default (``True``). Turns
+    with tool calls are left alone.
+    """
+
+    async def on_continue(state: AgentState) -> bool | str:
+        if state.output and state.output.message.tool_calls:
+            return True
+        left = earliest_finish_epoch - int(clock())
+        if left <= 0:
+            return True
+        return (
+            f"About {left} seconds remain before the evaluation will accept completion. "
+            "Keep investigating with your tools: verify the evidence behind your claims, "
+            "look for counterevidence, examine records you have not looked at yet, and "
+            "improve report.md. Do not idle or merely restate your conclusion."
+        )
+
+    return on_continue
+
+
 def inspect_agent(
     agent: str,
     *,
@@ -184,6 +210,7 @@ def inspect_agent(
     env: dict[str, str] | None = None,
     codex_features_off: Sequence[str] = (),
     extra_tools: Sequence[Tool] = (),
+    on_continue=None,
 ) -> Agent:
     """Return the first-class Inspect agent selected by the task.
 
@@ -220,6 +247,7 @@ def inspect_agent(
                 *(_with_react_feedback(t, env) for t in extra_tools),
             ],
             retry_refusals=REFUSAL_RETRY_LIMIT,
+            on_continue=on_continue,
         )
     raise ValueError(f"unsupported native agent: {agent!r}")
 
@@ -468,6 +496,7 @@ def inspect_native_agent(
     seed_reports: dict[int, str] | None = None,
     codex_features_off: Sequence[str] = (),
     investigation_tools: Sequence[str] = (),
+    policy_aware_continue_enabled: bool = False,
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -480,6 +509,8 @@ def inspect_native_agent(
     update throughout the investigation. Unexpected agent or sandbox failures
     still fail the sample normally.
     """
+    if policy_aware_continue_enabled and agent != "react":
+        raise ValueError("policy_aware_continue is only wired into agent=react")
     if investigation_tools and agent != "react":
         raise ValueError("investigation tools are only wired into agent=react so far")
     if not 0 <= min_runtime_fraction < 1:
@@ -535,6 +566,11 @@ def inspect_native_agent(
             claude_disallowed_tools=claude_disallowed_tools,
             codex_features_off=codex_features_off,
             extra_tools=extra_tools,
+            on_continue=(
+                policy_aware_continue(earliest_finish_epoch)
+                if policy_aware_continue_enabled
+                else None
+            ),
             env={
                 "MBAB_DEADLINE_EPOCH": str(deadline_epoch),
                 "MBAB_EARLIEST_FINISH_EPOCH": str(earliest_finish_epoch),
@@ -580,6 +616,11 @@ def inspect_native_agent(
                 and time.monotonic() - started < minimum_runtime_seconds
             ):
                 if early_stop_resume_attempts >= MAX_EARLY_STOP_CONTINUATIONS:
+                    if policy_aware_continue_enabled:
+                        # Accept the report rather than fail the sample; the violation
+                        # is recorded so analyses can include or exclude the run.
+                        state.metadata["minimum_runtime_violation"] = True
+                        break
                     _copy_agent_state(state, agent_state)
                     raise RuntimeError(
                         "minimum-runtime policy violation: agent completed normally "

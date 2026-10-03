@@ -256,3 +256,48 @@ def test_join_reports_overlap_between_fields(tmp_path, monkeypatch, capsys):
     assert "a.page: 3 distinct values; 1 also in b.name (1/4 rows matched)" in out
     assert cli.main(["join", "a.page", "b.name", "-i", "--data", str(d)]) == 0
     assert "2 also in b.name (3/4 rows matched)" in capsys.readouterr().out
+
+
+def test_policy_aware_continue_hook():
+    import asyncio
+    from types import SimpleNamespace
+
+    from messageboard_audit_bench.native import policy_aware_continue
+
+    now = [1000]
+    hook = policy_aware_continue(1450, clock=lambda: now[0])
+    no_tools = SimpleNamespace(output=SimpleNamespace(message=SimpleNamespace(tool_calls=[])))
+    with_tools = SimpleNamespace(output=SimpleNamespace(message=SimpleNamespace(tool_calls=["x"])))
+    early = asyncio.run(hook(no_tools))
+    assert isinstance(early, str) and "450 seconds" in early and "submit" not in early.lower()
+    assert asyncio.run(hook(with_tools)) is True
+    now[0] = 1500
+    assert asyncio.run(hook(no_tools)) is True  # Inspect's default nudge after the earliest finish
+
+
+def test_policy_aware_continue_option_is_recorded_and_restricted():
+    from messageboard_audit_bench.task import _german_wiki_report
+
+    s = _german_wiki_report(agent="react", policy_aware_continue=True, time_limit_minutes=10).dataset[0]
+    assert s.metadata["policy_aware_continue"] is True
+    plain = _german_wiki_report(agent="react", time_limit_minutes=10).dataset[0]
+    assert "policy_aware_continue" not in plain.metadata
+    with pytest.raises(ValueError):
+        _german_wiki_report(agent="codex", policy_aware_continue=True)
+
+
+def test_where_supports_numeric_and_ordered_text_comparisons(corpus, capsys):
+    from atlas.query import _parse_where
+
+    keep = _parse_where(["n>=2", "n<10", "t>2026-06-18"])
+    assert keep({"n": 5, "t": "2026-06-19T00:00:00Z"})
+    assert not keep({"n": 10, "t": "2026-06-19T00:00:00Z"})
+    assert not keep({"n": 5, "t": "2026-06-17T23:59:59Z"})
+    assert not keep({"t": "2026-06-19T00:00:00Z"})  # missing value never matches
+    assert _parse_where(["n>9"])({"n": "10"})  # numeric, not "10" < "9" as text
+    args = ["--data", str(corpus)]
+    assert cli.main(["rows", "posts", "--where", "time>=2026-02-20", "--where", "user!=rare_user", *args]) == 0
+    out = capsys.readouterr().out
+    assert "14 rows" in out and "posts:81" not in out  # the rare_user row is excluded
+    assert cli.main(["count", "posts.user", "--where", "time<2026-01-05", *args]) == 0
+    assert "of 81 rows" in capsys.readouterr().out

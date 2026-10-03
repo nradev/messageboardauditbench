@@ -120,7 +120,7 @@ def atlas() -> Tool:
           entities [--kind K] [--sort rare|count|first]   values to pivot on (field values, hosts, IPs,
                                          paths...), rarest first, with first/last seen and actors
           pivot VALUE [--exact]          every row in any file containing VALUE, as one timeline
-          count TABLE[.FIELD] [--where F=V|F!=V|F~RE ...] [--by day|hour|FIELD]   filtered counts and
+          count TABLE[.FIELD] [--where F=V|F!=V|F~RE|F>V|F<=V ...] [--by day|hour|FIELD]   filtered counts and
                                          group-bys, instead of writing a script
           rows TABLE [--where ...] [--fields a,b] [--sort time|FIELD] [--desc]   matching rows, one
                                          line each with their ids, instead of writing a script
