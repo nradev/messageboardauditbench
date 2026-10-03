@@ -118,20 +118,36 @@ def _hook_config() -> dict:
     return config
 
 
+def require_all_tool_parameters(model_name: str) -> bool:
+    """Whether ReAct tools must declare every parameter as required.
+
+    OpenAI-compatible strict tool validation requires every declared object
+    property to appear in ``required``, and OpenRouter can route OpenAI models to
+    Azure, which rejects Inspect's text_editor schema (only ``command`` and
+    ``path`` required) before the first turn. Only those models get the
+    all-required schema: elsewhere it makes the tool reject ordinary calls that
+    omit the unused, nullable arguments, which cost GPT-6 Luna (direct OpenAI)
+    and MiMo v2.6 Flash their reports in round-5 testing.
+    """
+    return model_name.startswith("openrouter/openai/")
+
+
 def _with_react_feedback(
-    base: Tool, env: dict[str, str], token_budget: OutputTokenBudget | None = None
+    base: Tool,
+    env: dict[str, str],
+    token_budget: OutputTokenBudget | None = None,
+    require_all_parameters: bool = False,
 ) -> Tool:
-    """Append the budget left and changed report counts after native ReAct tools."""
+    """Append the budget left and changed report counts after native ReAct tools.
+
+    ``require_all_parameters`` lists every parameter as required; see
+    `require_all_tool_parameters`. The command-specific arguments stay nullable,
+    so their optional semantics are preserved either way.
+    """
     definition = ToolDef(base)
     last_report: str | None = None
     parameters = deepcopy(definition.parameters)
-    # OpenAI-compatible strict tool validation requires every declared object
-    # property to appear in ``required``. Inspect's text_editor models its
-    # command-specific arguments as nullable, but normally requires only the
-    # two arguments common to every command. OpenRouter can route OpenAI models
-    # to Azure, which rejects that otherwise-valid schema before the first turn.
-    # Requiring the already-nullable fields preserves their optional semantics.
-    if parameters.properties:
+    if require_all_parameters and parameters.properties:
         parameters.required = list(parameters.properties)
 
     @wraps(base)
@@ -190,12 +206,15 @@ def inspect_agent(
     env: dict[str, str] | None = None,
     codex_features_off: Sequence[str] = (),
     token_budget: OutputTokenBudget | None = None,
+    require_all_parameters: bool = False,
 ) -> Agent:
     """Return the first-class Inspect agent selected by the task.
 
     ``codex_features_off`` names Codex ``[features]`` to disable, as the subscription
     runner does for URLQuery trials. ``token_budget`` (ReAct only) ends the loop one
-    final turn after the output-token budget is spent.
+    final turn after the output-token budget is spent. ``require_all_parameters``
+    (ReAct only) selects the all-required tool schema; see
+    `require_all_tool_parameters`.
     """
     if token_budget is not None and agent != "react":
         raise ValueError("an output-token budget is only supported for the react agent")
@@ -224,8 +243,10 @@ def inspect_agent(
         return react(
             name="messageboard_audit_react",
             tools=[
-                _with_react_feedback(bash(), env, token_budget),
-                _with_react_feedback(text_editor(), env, token_budget),
+                _with_react_feedback(bash(), env, token_budget, require_all_parameters),
+                _with_react_feedback(
+                    text_editor(), env, token_budget, require_all_parameters
+                ),
             ],
             retry_refusals=REFUSAL_RETRY_LIMIT,
             on_continue=token_budget.on_continue if token_budget is not None else None,
@@ -587,11 +608,17 @@ def inspect_native_agent(
             if output_token_budget is not None
             else None
         )
+        all_required = agent == "react" and require_all_tool_parameters(str(state.model))
+        if agent == "react":
+            state.metadata["react_tool_schema"] = (
+                "all_required" if all_required else "standard"
+            )
         selected = inspect_agent(
             agent,
             claude_disallowed_tools=claude_disallowed_tools,
             codex_features_off=codex_features_off,
             token_budget=token_budget,
+            require_all_parameters=all_required,
             env={
                 "MBAB_DEADLINE_EPOCH": str(deadline_epoch),
                 "MBAB_EARLIEST_FINISH_EPOCH": str(earliest_finish_epoch),
