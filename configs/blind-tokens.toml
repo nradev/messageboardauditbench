@@ -1,0 +1,22 @@
+# Named benchmark config: blind-v2 with an output-token budget instead of a time budget.
+# Native ReAct only (agent=react, backend=inspect). budget_tokens counts every output
+# token the model generates, reasoning included; the turn that crosses it finishes and
+# the agent then gets one final turn to finish report.md. Override with -T token_budget=N
+# (the 10/30/120-minute calibration from round 4 gives 25000/75000/200000).
+# budget_min is only the wall-clock backstop here, so a stalled provider cannot hang
+# a run; override it with -T time_limit_minutes=N.
+name = "blind-tokens"
+prompt = "blind-v2-tokens"
+budget_tokens = 25000
+budget_min = 240
+timeout_min = 240
+data_variant = "verbatim"
+effort = "xhigh"
+claude_disallowed_tools = ["WebFetch", "WebSearch", "Task", "Skill", "ToolSearch", "RemoteTrigger", "SendMessage", "ListAgents", "Workflow", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree"]
+
+# Prompt target and strict upper limit. Scoring tolerates a 100-word overrun;
+# short nonempty reports remain valid.
+report_min_words = 2500
+report_max_words = 3000
+report_accept_min_words = 0
+report_accept_max_words = 3200

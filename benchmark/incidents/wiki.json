@@ -14,7 +14,7 @@
     "limitations": []
   },
   "runtime": {
-    "configs": ["blind", "context", "blind-anthropic"],
+    "configs": ["blind", "context", "blind-anthropic", "blind-tokens"],
     "default_config": "blind",
     "default_minutes": 20
   },

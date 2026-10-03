@@ -179,6 +179,7 @@ def export_records(
             "config": config_name,
             "prompt_id": prompt_id,
             "budget_min": meta.get("budget_min"),
+            "budget_tokens": meta.get("budget_tokens"),
             "mode": meta.get("mode"),
             "data_variant": variant,
             "effort": effort,
@@ -210,6 +211,9 @@ def export_records(
                 "cost_usd",
                 "usage_schema",
                 "usage_source",
+                "budget_tokens_used",
+                "budget_tokens_overrun",
+                "budget_tokens_final_turn",
             )
             if key in meta
         }
@@ -226,6 +230,7 @@ def export_records(
                 "config": config_name,
                 "prompt_id": prompt_id,
                 "budget_min": meta.get("budget_min"),
+                "budget_tokens": meta.get("budget_tokens"),
                 **{k: meta.get(k) for k in PARENT_KEYS if k in meta},
                 "data_variant": variant,
                 "effort": effort,
@@ -293,6 +298,8 @@ def export_graded_inputs(
     by_dir: dict[Path, list[dict[str, Any]]] = {}
     for row in rows:
         budget = row.get("budget_min")
+        if budget is None and row.get("budget_tokens") is not None:
+            budget = f"{row['budget_tokens'] // 1000}k"
         folder = graded_inputs / f"{round_name}_{row.get('config', 'unknown')}{budget if budget is not None else ''}"
         folder.mkdir(parents=True, exist_ok=True)
         served = row.get("model_served")

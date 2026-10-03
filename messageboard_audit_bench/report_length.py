@@ -141,7 +141,9 @@ def instruction(low: int, high: int) -> str:
     )
 
 
-def render_prompt(template: str, budget_min: int, low: int, high: int) -> str:
+def render_prompt(
+    template: str, budget_min: int, low: int, high: int, budget_tokens: int | None = None
+) -> str:
     """Render shared config values without duplicating embedded length prose."""
     embedded_length = "{{#REPORT_LENGTH}}" in template
     text = re.sub(
@@ -152,6 +154,7 @@ def render_prompt(template: str, budget_min: int, low: int, high: int) -> str:
     )
     for token, value in {
         "BUDGET_MIN": str(budget_min),
+        "BUDGET_TOKENS": f"{budget_tokens:,}" if budget_tokens is not None else "",
         "REPORT_MIN_WORDS": f"{low:,}",
         "REPORT_MAX_WORDS": f"{high:,}",
     }.items():
