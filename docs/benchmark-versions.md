@@ -6,7 +6,7 @@ results were run at German wiki report version `6.1` (labelled `6-B` at the time
 
 | benchmark | Inspect task | current version | storage id |
 |---|---|---:|---|
-| German wiki report | `german_wiki_report` | `10.0` | `messageboard` |
+| German wiki report | `german_wiki_report` | `11.0` | `messageboard` |
 | Transluce report | `transluce_report` | `1.0` | `urlquery` |
 
 The storage id is what run records, configs and grade files write as `benchmark_id`. It
@@ -83,6 +83,7 @@ B is minor 1. Each tag points at the last commit that carried its version.
 | `8.0` | `8-A` | `german-wiki-report-v8.0` (`d347133`) | Introduced with the September 11 Mythos 5 incident and kept through later changes, including RubyHack and the September 26 report-count changes. It did not define the LessWrong runs. |
 | `9.0` | `9-A` | `german-wiki-report-v9.0` (`e52e499`) | The September 26 report feedback and word-count rule. |
 | `10.0` | `10-A` | `german-wiki-report-v10.0` | The shared runtime changes merged with the Transluce report (below). Also the task rename and version flag, which do not change behaviour. |
+| `11.0` | | not yet tagged | The default judge is Claude Opus 5.5, and the `blind-tokens` output-token budget is added (below). |
 
 The archived logs provide the direct evidence for the LessWrong run version: the
 `task_version` field is `6-B` in the local round 4, followup, and provider-swap cohorts.
@@ -122,6 +123,20 @@ alter behaviour:
 - The task was renamed from `messageboard_audit_bench`.
 - The Mythos 5 and RubyHack drafts are no longer selectable as configs; they are drafts
   for separate evals.
+
+**`11.0`.** The default judge changed from `openai/gpt-5.6-sol` to
+`anthropic/claude-opus-5-5` on the audit, replay, continuation and grading tasks and in
+`scripts/run_inspect_matrix.sh`, so default scores are not comparable with `10.0`. An
+explicit `-T judge=` or `--model-role grader=` still selects any judge; the published
+comparison set remains Fable 5.1 grades. Prompts, data, rubrics and the existing configs
+are unchanged. Also new, and not affecting existing configs:
+
+- The `blind-tokens` config (prompt `blind-v2-tokens`) gives native ReAct an output-token
+  budget instead of a time budget: the turn that crosses it finishes, then one final turn
+  to finish report.md. `-T token_budget=N` sets it; `time_limit_minutes` becomes a
+  wall-clock backstop.
+- Native runs record the provider-billed cost (`cost_source: provider`) when Inspect has
+  no price for the model.
 
 For a short while on 2026-09-28 the code said `10-A`, with the old task name and
 identical behaviour.

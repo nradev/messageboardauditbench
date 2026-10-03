@@ -54,7 +54,7 @@ class BenchmarkSpec:
 SPECS = {
     "messageboard": BenchmarkSpec(
         "messageboard", "german-wiki-report", "German wiki report", "german_wiki_report",
-        "messageboard_audit_bench", "10.0", "benchmark", "runs", "reports", "logs",
+        "messageboard_audit_bench", "11.0", "benchmark", "runs", "reports", "logs",
     ),
     "urlquery": BenchmarkSpec(
         "urlquery", "transluce-report", "Transluce report", "transluce_report",

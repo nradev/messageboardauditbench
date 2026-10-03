@@ -493,7 +493,7 @@ def _german_wiki_report(
     allow_networked_subscription: bool = True,
     time_limit_minutes: int | None = None,
     min_runtime_fraction: float = 0.75,
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     rubric: str | None = None,
     data_variant: str | None = None,
     version: str | None = None,
@@ -528,7 +528,7 @@ def _german_wiki_report(
             or ``legacy`` for the old starter rubric.
         data_variant: Override the config's dataset, including
             ``verbatim_anthropic`` for the provider attribution ablation.
-        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``10.0``). The task
+        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``11.0``). The task
             refuses to run if this checkout is a different version; use
             ``scripts/run_eval.py --version`` to run another one.
     """
@@ -562,7 +562,7 @@ def incident_task(config: str, **kwargs) -> Task:
     RubyHack). It is not an Inspect task: drafts become their own eval once reviewed.
     """
     variant = _load_config(config, allow_drafts=True)["data_variant"]
-    scorer_args = {"judge": kwargs.pop("judge", "openai/gpt-5.6-sol"), "rubric": kwargs.pop("rubric", None)}
+    scorer_args = {"judge": kwargs.pop("judge", "anthropic/claude-opus-5-5"), "rubric": kwargs.pop("rubric", None)}
     defaults = {"agent": "claude", "backend": "inspect", "subscription_model": None,
                 "allow_networked_subscription": True, "time_limit_minutes": None,
                 "min_runtime_fraction": 0.75, "data_variant": None}
@@ -639,7 +639,7 @@ urlquery_audit_bench = task(name="urlquery_audit_bench")(_transluce_report)
 def _german_wiki_report_replay(
     runs_glob: str = "*",
     include_failed: bool = True,
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     rubric: str | None = None,
 ) -> Task:
     """Import local run artifacts into Inspect without rerunning agents."""
@@ -717,7 +717,7 @@ def _german_wiki_report_continue(
     parent_log: str,
     parent_epochs: str = "all",
     config: str = "followup-5k",
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     rubric: str | None = None,
 ) -> Task:
     """Continue finished ReAct samples with a follow-up request.

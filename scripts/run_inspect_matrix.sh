@@ -23,7 +23,7 @@ Run shape:
   --token-budget N              output-token budget for a token config (react only)
   --min-runtime-fraction F      minimum fraction before completion (default: 0.75; 0 disables)
   --epochs N                    independent replicates (default: 1)
-  --judge MODEL                 grader model (default: openai/gpt-5.6-sol)
+  --judge MODEL                 grader model (default: anthropic/claude-opus-5-5)
   --logs DIR                    Inspect log directory (default: logs)
 
 Operational limits (all explicit in the resulting command):
@@ -52,7 +52,7 @@ time_limit_minutes=""
 token_budget=""
 min_runtime_fraction=0.75
 epochs=1
-judge="openai/gpt-5.6-sol"
+judge="anthropic/claude-opus-5-5"
 logs=logs
 max_samples=1
 max_sandboxes=1

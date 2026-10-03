@@ -17,7 +17,7 @@ from messageboard_audit_bench.task import german_wiki_report as build_task
 def test_task_has_stable_sample_and_version() -> None:
     task = build_task(agent="codex", config="blind")
 
-    assert task.version == EVAL_VERSION == "10.0"
+    assert task.version == EVAL_VERSION == "11.0"
     assert len(task.dataset) == 1
     assert task.dataset[0].id == "codex:inspect:blind:20m"
     assert task.dataset[0].metadata == {
@@ -288,9 +288,9 @@ def test_draft_incidents_are_not_german_wiki_conditions() -> None:
     assert task_module.incident_task("mythos5").dataset[0].metadata["incident"] == "mythos5"
 
 
-@pytest.mark.parametrize("requested", [None, "10.0", "10", "v10.0", "10-A"])
+@pytest.mark.parametrize("requested", [None, "11.0", "11", "v11.0", "11-A"])
 def test_version_guard_accepts_this_version_in_any_spelling(requested) -> None:
-    assert build_task(agent="codex", version=requested).version == "10.0"
+    assert build_task(agent="codex", version=requested).version == "11.0"
 
 
 def test_version_guard_points_to_the_launcher_for_another_version() -> None:
