@@ -75,7 +75,7 @@ from messageboard_audit_bench.benchmarks import (
     urlquery_manifest,
 )
 from messageboard_audit_bench.configs import CONFIG_NAME, load_config
-from messageboard_audit_bench.grading.core import variant_for_data
+from messageboard_audit_bench.grading.core import SINGLE_CALL_MODES, variant_for_data
 from messageboard_audit_bench.grading.finding_scorer import finding_scorer
 from messageboard_audit_bench.grading.scorer import sheet_scorer
 from messageboard_audit_bench.incidents import (
@@ -298,6 +298,7 @@ def _scorers(
     rubric: str | None,
     data_variant: str | None = None,
     judge_effort: str | None = None,
+    judge_single_call: bool = False,
 ) -> list:
     """Benchmark sheets plus diagnostic scores; legacy grading is explicit."""
     scorers = [process_metrics(), report_length()]
@@ -309,7 +310,8 @@ def _scorers(
         raise ValueError("rubric must not contain duplicate modes")
     return [
         sheet_scorer(
-            rubric=mode, judge=judge, variant=variant_for_data(data_variant), effort=judge_effort
+            rubric=mode, judge=judge, variant=variant_for_data(data_variant), effort=judge_effort,
+            single_call=judge_single_call and mode in SINGLE_CALL_MODES,
         )
         for mode in modes
     ] + scorers
@@ -544,6 +546,7 @@ def _german_wiki_report(
     sweep_at_start: bool = False,
     token_budget: int | None = None,
     judge_effort: str | None = None,
+    judge_single_call: bool = False,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -572,12 +575,14 @@ def _german_wiki_report(
         judge_effort: The judge's starting reasoning effort (default ``xhigh``, as
             published; ``medium`` is faster and cheaper for iteration but scores
             differently).
+        judge_single_call: Grade the findings rubric in one judge call per report
+            instead of one per sheet; the TL;DR rubric is unaffected.
         rubric: Comma-separated sheet modes; defaults to ``v2,tldrh`` (findings
             and the TL;DR summary). Use Inspect's ``--no-score`` to defer grading,
             or ``legacy`` for the old starter rubric.
         data_variant: Override the config's dataset, including
             ``verbatim_anthropic`` for the provider attribution ablation.
-        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``12.1``). The task
+        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``12.2``). The task
             refuses to run if this checkout is a different version; use
             ``scripts/run_eval.py --version`` to run another one.
         tools: Comma-separated investigation tools for ``agent=react``: ``atlas``, and
@@ -611,7 +616,7 @@ def _german_wiki_report(
         time_limit_minutes=time_limit_minutes,
         min_runtime_fraction=min_runtime_fraction,
         data_variant=data_variant,
-        scorers=_scorers(judge, rubric, variant, judge_effort),
+        scorers=_scorers(judge, rubric, variant, judge_effort, judge_single_call),
         tools=tools,
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,

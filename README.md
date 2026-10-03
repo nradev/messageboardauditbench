@@ -7,7 +7,7 @@ sandbox, agents, subscription runner and grading plumbing.
 
 | benchmark | Inspect task | version | evidence | grading |
 |---|---|---:|---|---|
-| German wiki report | `german_wiki_report` | `12.1` | the collusion.wiki dump, `data/<variant>/` | claim sheets `v2` + `tldrh` |
+| German wiki report | `german_wiki_report` | `12.2` | the collusion.wiki dump, `data/<variant>/` | claim sheets `v2` + `tldrh` |
 | Transluce report | `transluce_report` | `1.0` | urlquery.net scans, `data/urlquery/<snapshot>/` | per-finding judge, `reviewed` rubric |
 
 **German wiki report.** The source incident is

@@ -93,6 +93,19 @@ async def grade_sheet(
     """One sheet. Returns (claims, effort actually used); raises only if nothing parses."""
     spec = core.MODES[mode]
     system, prefix, suffix = core.build_prompt(mode, rubric_id, report_md, templates, variant)
+    return await _grade_prompt(model, f"{mode}/{rubric_id}", system, prefix, suffix, spec, efforts)
+
+
+async def _grade_prompt(
+    model: Model,
+    label: str,
+    system: str,
+    prefix: str,
+    suffix: str,
+    spec: core.ModeSpec,
+    efforts: tuple[str, ...],
+) -> tuple[dict[str, dict], str]:
+    """One judge call (with the effort ladder and one JSON retry) -> (claims, effort)."""
     last: Exception | None = None
     for effort in efforts:
         try:
@@ -112,10 +125,40 @@ async def grade_sheet(
             data = core.extract_json(out.completion)
         if data is None:
             raise ValueError(
-                f"unparseable JSON from {model} on {mode}/{rubric_id}: {out.completion[:200]!r}"
+                f"unparseable JSON from {model} on {label}: {out.completion[:200]!r}"
             )
         return core.parse_items(data, spec.lo, spec.hi), effort
-    raise RuntimeError(f"all efforts failed for {mode}/{rubric_id}: {last!r}")
+    raise RuntimeError(f"all efforts failed for {label}: {last!r}")
+
+
+async def _grade_single_call(
+    model: Model,
+    mode: str,
+    report_md: str,
+    templates: dict[str, str],
+    variant: str | None,
+    efforts: tuple[str, ...],
+    sets: list[dict],
+) -> list[tuple[dict[str, dict], str] | Exception]:
+    """Every sheet in one judge call, split back into one result per sheet.
+
+    A sheet none of whose claims came back is failed; one with some claims missing keeps
+    the claims that came back (`missing_claims` in the grade records the rest).
+    """
+    system, prefix, suffix = core.build_single_prompt(mode, report_md, templates, variant)
+    try:
+        items, effort = await _grade_prompt(
+            model, f"{mode}/single", system, prefix, suffix, core.MODES[mode], efforts
+        )
+    except Exception as exc:  # noqa: BLE001 — every sheet fails together
+        return [exc] * len(sets)
+    results: list[tuple[dict[str, dict], str] | Exception] = []
+    for spec in sets:
+        got = {c["id"]: items[c["id"]] for c in spec["claims"] if c["id"] in items}
+        results.append(
+            (got, effort) if got else ValueError("single-call reply has none of this sheet's claims")
+        )
+    return results
 
 
 @scorer(metrics=[mean(), stderr()])
@@ -124,6 +167,7 @@ def sheet_scorer(
     judge: str | Model | None = None,
     variant: str | None = None,
     effort: str | None = None,
+    single_call: bool = False,
 ) -> Scorer:
     """Grade the report against every sheet of `rubric`.
 
@@ -136,8 +180,18 @@ def sheet_scorer(
         variant, so a verbatim_anthropic run is judged against the swapped answer key.
       effort: the judge's starting reasoning effort (default xhigh, as published; see
         `effort_ladder`). The effort actually used is recorded per sheet.
+      single_call: grade every sheet in one judge call (`core.build_single_prompt`)
+        instead of one call per sheet: about 7x less input and one latency. Only for
+        multi-sheet finding rubrics (`core.SINGLE_CALL_MODES`); the grade records
+        `grading_calls: "single"`, and its scores are not interchangeable with per-sheet
+        grades.
     """
     efforts = effort_ladder(effort)
+    if single_call and rubric not in core.SINGLE_CALL_MODES:
+        raise ValueError(
+            f"single_call supports {sorted(core.SINGLE_CALL_MODES)}, not {rubric!r}; the TL;DR "
+            "rubrics stay separate so the judge sees only the summary"
+        )
     if rubric not in core.MODES:
         raise ValueError(f"unknown rubric {rubric!r}; expected one of {sorted(core.MODES)}")
     core.load_sheets(rubric, variant)  # Validate assets before launching an agent.
@@ -155,16 +209,21 @@ def sheet_scorer(
         failures: dict[str, str] = {}
         # All sheets at once (bounded by --max-connections); exceptions are kept per
         # sheet and the results combined in sheet order, as the sequential loop did.
-        results = await asyncio.gather(
-            *(
-                grade_sheet(
-                    model, rubric, spec["rubric_id"], report_md, templates,
-                    selected_variant, efforts,
-                )
-                for spec in sets
-            ),
-            return_exceptions=True,
-        )
+        if single_call:
+            results = await _grade_single_call(
+                model, rubric, report_md, templates, selected_variant, efforts, sets
+            )
+        else:
+            results = await asyncio.gather(
+                *(
+                    grade_sheet(
+                        model, rubric, spec["rubric_id"], report_md, templates,
+                        selected_variant, efforts,
+                    )
+                    for spec in sets
+                ),
+                return_exceptions=True,
+            )
         for spec, result in zip(sets, results, strict=True):
             rubric_id = spec["rubric_id"]
             if isinstance(result, BaseException):
@@ -184,6 +243,12 @@ def sheet_scorer(
         out = core.aggregate(
             key, title, core.judge_name(str(model)), rubric, per_claim, per_rubric, sets, selected_variant
         )
+        if single_call and out["max"]:
+            out["grading_calls"] = "single"
+            expected = [c["id"] for spec in sets for c in spec["claims"]]
+            missing = [cid for cid in expected if cid not in per_claim]
+            if missing:
+                out["missing_claims"] = missing
         if out["max"] == 0:
             return Score.unscored(
                 reason="every sheet failed",

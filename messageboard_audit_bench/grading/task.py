@@ -58,6 +58,7 @@ def _german_wiki_report_grade(
     judge: str = "anthropic/claude-opus-5-5",
     variant: str | None = None,
     judge_effort: str | None = None,
+    single_call: bool = False,
 ) -> Task:
     """Grade every staged report in `dir` against `rubric`.
 
@@ -72,6 +73,9 @@ def _german_wiki_report_grade(
       judge_effort: the judge's starting reasoning effort: ``xhigh`` (default, as
         published), ``high``, ``medium`` or ``low``. Lower is faster and cheaper but
         scores differently; compare only grades made at the same effort.
+      single_call: grade all of a findings rubric's sheets (``v2``) in one judge call per
+        report instead of one per sheet. Faster and cheaper; scores are not
+        interchangeable with per-sheet grades.
     """
     folder = staged_dir(dir)
     core.require_original_benchmark_folder(folder)
@@ -103,7 +107,10 @@ def _german_wiki_report_grade(
     return Task(
         dataset=samples,
         solver=report_from_sample(),
-        scorer=sheet_scorer(rubric=rubric, judge=judge, variant=variant, effort=judge_effort),
+        scorer=sheet_scorer(
+            rubric=rubric, judge=judge, variant=variant, effort=judge_effort,
+            single_call=single_call,
+        ),
         model="mockllm/model",
         metadata={
             "benchmark": "German wiki report",
@@ -112,6 +119,7 @@ def _german_wiki_report_grade(
             "rubric": rubric,
             "judge": judge,
             "judge_effort": judge_effort or "xhigh",
+            "grading_calls": "single" if single_call else "per_sheet",
             "staged_dir": folder.name,
         },
     )

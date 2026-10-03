@@ -6,7 +6,7 @@ results were run at German wiki report version `6.1` (labelled `6-B` at the time
 
 | benchmark | Inspect task | current version | storage id |
 |---|---|---:|---|
-| German wiki report | `german_wiki_report` | `12.1` | `messageboard` |
+| German wiki report | `german_wiki_report` | `12.2` | `messageboard` |
 | Transluce report | `transluce_report` | `1.0` | `urlquery` |
 
 The storage id is what run records, configs and grade files write as `benchmark_id`. It
@@ -86,6 +86,7 @@ B is minor 1. Each tag points at the last commit that carried its version.
 | `11.0` | | not yet tagged | The default judge is Claude Opus 5.5, and the `blind-tokens` output-token budget is added (below). |
 | `12.0` | | not yet tagged | Native ReAct tools use the standard schema except for OpenAI models routed through OpenRouter (below). |
 | `12.1` | | not yet tagged | Faster grading: concurrent sheets and an optional judge effort (below). |
+| `12.2` | | not yet tagged | Optional single-call grading of the findings sheets (below). |
 
 The archived logs provide the direct evidence for the LessWrong run version: the
 `task_version` field is `6-B` in the local round 4, followup, and provider-swap cohorts.
@@ -156,8 +157,20 @@ another, combining them in sheet order, so default grades are unchanged. A new
 `run_inspect_matrix.sh`, and `scripts/grade_staged.sh`, which runs the findings and TL;DR
 sheets together) sets the judge's starting effort; the default stays `xhigh`. On three
 DeepSeek V4.1 Flash reports, GPT-6.1 Sol at `medium` matched its `xhigh` grades to within
-0.011 combined (88% of finding scores within 0.1) at a fifth of the cost, and the batch
-took 31 s instead of about 10 minutes. Compare only grades made at the same effort.
+0.011 combined (88% of finding scores within 0.1) for $1.73 instead of $2.25 (input
+dominates, and parallel calls get no cache hits), and the batch took 31 s instead of about
+10 minutes. Compare only grades made at the same effort.
+
+**`12.2`.** `single_call` (grading task; `judge_single_call` on the audit task;
+`SINGLE_CALL=1` for `scripts/grade_staged.sh`) grades all eight findings sheets in one
+judge call per report. `grading.core.build_single_prompt` assembles it from the sheets at
+grading time (shared instructions, answer key and report once; every point; one JSON
+contract), so it cannot drift from them, and the grade records `grading_calls: "single"`
+and any `missing_claims`. The TL;DR rubric keeps its own call so its judge still sees only
+the summary. On 12 reports, Sol at `medium` in one call gave coverage within 0.02 of
+per-sheet `xhigh` on average (mean +0.010; largest +0.068, a GPT-6 Luna report), the same
+model ordering, and 57 of 66 report pairs in the same order, for $0.094 per report instead
+of about $0.45 for the eight findings sheets. The default stays per-sheet `xhigh`.
 
 For a short while on 2026-09-28 the code said `10-A`, with the old task name and
 identical behaviour.
