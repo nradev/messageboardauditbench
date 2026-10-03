@@ -313,15 +313,22 @@ def diff_lines(base: list[str], text: str, limit: int) -> str:
 
 
 def per_day(idx: Index, c: Cluster) -> str:
-    days = Counter(short_day(t) for t in (idx.time_of(c.table, r) for r in c.members) if t)
+    """Rows per time bucket, in the corpus's unit (a day for most logs, minutes or hours for a
+    corpus spanning a day, weeks for years)."""
+    from .timeline import time_unit
+
+    unit = time_unit(idx)
+    fmt = (lambda t: unit.floor(t).strftime("%H:%M")) if unit.sub_day else (
+        (lambda t: short_day(unit.floor(t))) if unit.name == "day" else (lambda t: unit.label(unit.floor(t))))
+    days = Counter(fmt(t) for t in (idx.time_of(c.table, r) for r in c.members) if t)
     if not days:
         return ""
     items = sorted(days.items())
     if len(items) > 14:
         top = sorted(items, key=lambda kv: -kv[1])[:10]
-        return f"active {len(items)} days, {items[0][0]} → {items[-1][0]}; busiest: " + \
+        return f"active {len(items)} {unit.plural}, {items[0][0]} → {items[-1][0]}; busiest: " + \
             ", ".join(f"{d} {n}" for d, n in sorted(top))
-    return "per day: " + ", ".join(f"{d} {n}" for d, n in items)
+    return f"per {unit.name}: " + ", ".join(f"{d} {n}" for d, n in items)
 
 
 def cmd_expand(idx: Index, args) -> str:

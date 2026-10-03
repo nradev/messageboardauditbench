@@ -751,7 +751,8 @@ def inspect_native_agent(
             if crew is not None:
                 if crew.background is not None and not crew.background.done():
                     crew.background.cancel()
-                state.metadata["crew"] = crew.stats.metadata()
+                state.metadata["crew"] = {**crew.stats.metadata(), "notes_kept": len(crew.notes),
+                                          "notes_shown": sum(1 for n in crew.notes if n["shown"])}
                 if sweep_at_start:
                     rec = crew.background_record
                     state.metadata["crew_sweep_at_start"] = {

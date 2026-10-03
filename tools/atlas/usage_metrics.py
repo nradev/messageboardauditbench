@@ -116,7 +116,8 @@ def summarize(path: Path, data: Path | None) -> list[str]:
             out.append(f"    crew readers {crew.get('reader_calls')} calls, {crew.get('input_tokens', 0):,} in / "
                        f"{crew.get('output_tokens', 0):,} out tokens, median {lat.get('median')}s; quotes verified "
                        f"{crew.get('notes_verified')}/{ret}" + (f" ({crew.get('notes_verified', 0) / ret:.0%})" if ret else "")
-                       + f", timeouts {crew.get('timeouts')}, errors {crew.get('errors')}")
+                       + f", timeouts {crew.get('timeouts')}, errors {crew.get('errors')}"
+                       + (f"; notes kept {crew['notes_kept']}, shown {crew.get('notes_shown')}" if "notes_kept" in crew else ""))
             bg = s.metadata.get("crew_sweep_at_start")
             if bg:
                 out.append(f"    background sweep: finished {bg.get('finished')}, delivered at "

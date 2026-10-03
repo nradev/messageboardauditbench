@@ -424,7 +424,40 @@ def test_anomalies_find_lookalikes_mixed_scripts_and_bursts(tmp_path, monkeypatc
     assert "'admin_karl' (posts.user" in out and f"look-alike '{lookalike}'" in out
     assert "U+0430 CYRILLIC SMALL LETTER A" in out
     assert "looks like 'admin_karl'" in out  # the mixed-script word in the text
-    assert "posts.user=bot7: 30 rows on 2026-01-16" in out
+    assert "posts.user=bot7: 30 rows" in out and "2026-01-16" in out.split("posts.user=bot7")[1][:80]
     from atlas.anomalies import skeleton
 
     assert skeleton("Fri\u0435drich") == skeleton("friedrich") and skeleton("M\u00fcller") != skeleton("Muller")
+
+
+def test_time_unit_adapts_to_the_corpus_span_and_gapcheck_matches_times(tmp_path, monkeypatch, capsys):
+    """A corpus spanning hours is read in sub-day buckets: peaks and changes are found, and
+    the gap checker matches times of day in the report, not just the (single) date."""
+    rows = []
+    for m in range(0, 240, 2):  # 4 hours of quiet activity, one row every 2 minutes
+        rows.append({"id": f"q{m}", "time": f"2026-03-05T{8 + m // 60:02d}:{m % 60:02d}:00Z", "user": "u1",
+                     "body": f"routine step {m}"})
+    for k in range(60):  # a surge between 10:00 and 10:20
+        rows.append({"id": f"s{k}", "time": f"2026-03-05T10:{k // 3:02d}:{(k * 7) % 60:02d}Z", "user": "u2",
+                     "body": f"surge item {k}"})
+    d = tmp_path / "data"
+    d.mkdir()
+    with (d / "log.jsonl").open("w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    monkeypatch.setenv("ATLAS_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("ATLAS_STATE", str(tmp_path / "state.jsonl"))
+    from atlas.timeline import time_unit
+
+    assert time_unit(build_index(d)).name == "minute" or time_unit(build_index(d)).name == "10 minutes"
+    assert cli.main(["timeline", "--data", str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "counted per" in out and "peak at 2026-03-05 10:" in out
+    report = tmp_path / "report.md"
+    report.write_text("# Report\n\nOn 2026-03-05 the log shows routine steps (log:1).\n")
+    assert cli.main(["gapcheck", str(report), "--data", str(d)]) == 0
+    assert "peak at 2026-03-05 10:" in capsys.readouterr().out  # the date alone does not cover it
+    report.write_text("# Report\n\nOn 2026-03-05 the log shows routine steps (log:1), then a surge at 10:05 "
+                      "(log:130).\n")
+    assert cli.main(["gapcheck", str(report), "--data", str(d)]) == 0
+    assert "peak at 2026-03-05 10:" not in capsys.readouterr().out

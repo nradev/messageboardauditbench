@@ -22,12 +22,12 @@ import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 from . import coverage
 from .index import Index
 from .profile import _ACTOR_NAME
-from .timeline import describe, events_for, series_for
+from .timeline import describe, events_for, series_for, time_unit
 
 MIN_QUOTE_WORDS = 4
 MIN_QUOTE_CHARS = 20
@@ -35,6 +35,14 @@ FIX_NOT_FOUND_WORDS = 6  # shorter unmatched quotes are only Consider items
 NEAR_MATCH = 0.5  # below this similarity a long unmatched quote is "not found" (Fix); above it, Consider
 MAX_FIX = 10
 MAX_CONSIDER = 8
+MAX_UNUSED_NOTES = 3  # reader notes the report does not use, among the Consider items
+MAX_UNUSED_ANOMALIES = 2
+RESERVED = 2  # Consider slots kept for unused reader notes and anomalies
+# Reader note kinds, most worth a second look first.
+NOTE_WEIGHT = {"unexpected": 1.0, "outcomes": 0.8, "actions": 0.8, "claims": 0.7, "answer": 0.7,
+               "open_questions": 0.5, "actors": 0.4, "times": 0.4}
+_KEY_TERM = re.compile(r"[\w.@/-]*\d[\w.@/-]*|\b[A-Z][a-z]+[A-Z]\w*|\b\w{9,}\b")
+_LOOKALIKE_WORDS = re.compile(r"cyrillic|greek|homoglyph|look-?alike|confusable|unicode|non-ascii|mixed[- ]script")
 
 _MONTHS = {m: i for i, m in enumerate(
     "january february march april may june july august september october november december".split(), 1)}
@@ -49,6 +57,7 @@ _BLOCKQUOTE = re.compile(r"^\s*>\s?(.+)$", re.M)
 _BACKTICK = re.compile(r"`([^`\n]{1,400})`")
 _ISO_DATE = re.compile(r"\b(20\d\d)-(\d\d)-(\d\d)\b")
 _MD_DATE = re.compile(r"(?<![\d-])(\d\d)-(\d\d)(?![\d-])")
+_CLOCK = re.compile(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?(?![\d:])")
 _NAMED_DATE = re.compile(r"\b(\d{1,2})\s+([A-Z][a-z]{2,8})\b|\b([A-Z][a-z]{2,8})\.?\s+(\d{1,2})\b")
 _ELISION = re.compile(r"\s*(?:…|\[\.\.\.\]|\[…\]|\.\.\.)\s*")
 _TOKEN = re.compile(r"[\w~@:./%+-]{4,}")
@@ -203,6 +212,7 @@ class Report:
     units: list[tuple[str, int]] = field(default_factory=list)  # (cluster/theme id, offset)
     quotes: list[tuple[str, int, int]] = field(default_factory=list)  # (quote, start, end)
     dates: list[tuple[date, int]] = field(default_factory=list)
+    clock: list[tuple[int, int, int]] = field(default_factory=list)  # (hour, minute, offset)
     norm: str = ""
 
 
@@ -254,6 +264,8 @@ def parse_report(idx: Index, text: str, year: int) -> Report:
             rep.dates.append((date(year, int(m[1]), int(m[2])), m.start()))
         except ValueError:
             pass
+    for m in _CLOCK.finditer(text):
+        rep.clock.append((int(m[1]), int(m[2]), m.start()))
     for m in _NAMED_DATE.finditer(text):
         day, mon = (m[1], m[2]) if m[1] else (m[4], m[3])
         mi = _MONTHS.get(mon.lower())
@@ -453,6 +465,25 @@ def _date_hit(days: set[date], d: date, slack: int = 1) -> bool:
     return any(abs((x - d).days) <= slack for x in days)
 
 
+def _mentioned_times(rep: Report, default_day: date | None) -> list[datetime]:
+    """Times of day in the report, each on the closest date mentioned before it (or the
+    corpus's day when it spans one), for corpora read at sub-day resolution."""
+    out = []
+    dates = sorted(rep.dates, key=lambda d: d[1])
+    for h, mi, pos in rep.clock:
+        day = next((d for d, p in reversed(dates) if p < pos), default_day)
+        if day:
+            out.append(datetime(day.year, day.month, day.day, h, mi))
+    return out
+
+
+def _mentioned_near(e_at: datetime, unit, days: set[date], times: list[datetime]) -> bool:
+    if not unit.sub_day:
+        return _date_hit(days, e_at.date(), slack=max(1, unit.seconds // 86400))
+    naive = e_at.replace(tzinfo=None)
+    return any(abs((t - naive).total_seconds()) <= 2 * unit.seconds for t in times)
+
+
 def consider_checks(idx: Index, rep: Report, text_lower: str) -> list[Item]:
     items: list[Item] = []
     total_rows = sum(len(t.rows) for t in idx.tables.values()) or 1
@@ -470,20 +501,26 @@ def consider_checks(idx: Index, rep: Report, text_lower: str) -> list[Item]:
                               score=0.5 * share + 0.5 * th.actors / max_actors))
     # Time structure: peaks, sharp changes and ends of the main series the report never dates.
     days = _mentioned_dates(rep)
+    unit = time_unit(idx)
+    spans = [(p.fields[p.time_field].tmin, p.fields[p.time_field].tmax) for p in idx.profiles.values()
+             if p.time_field and p.fields[p.time_field].tmin]
+    one_day = spans[0][0].date() if spans and all(a.date() == spans[0][0].date() == b.date() for a, b in spans) else None
+    times = _mentioned_times(rep, one_day) if unit.sub_day else []
     seen_events: set[tuple] = set()
-    for s in series_for(idx)[:12]:
+    for s in series_for(idx, unit)[:12]:
         share = s.rows / total_rows
         for e in events_for(s):
-            if e.kind not in ("peak", "rise", "fall", "end") or _date_hit(days, e.day):
+            if e.kind not in ("peak", "rise", "fall", "end") or _mentioned_near(e.at, unit, days, times):
                 continue
             if e.kind == "end" and ("." in s.name or share < 0.1):
                 continue  # last activity only for whole files
-            sig = (e.kind, e.day, e.count)
+            sig = (e.kind, e.at)
             if sig in seen_events:
-                continue  # the same event seen through another field (identical series)
+                continue  # the same event seen through another series (a file and its dominant values)
             seen_events.add(sig)
-            items.append(Item("consider", f"time|{s.name}|{e.kind}|{e.day}",
-                              f"{describe(e)}; the report gives no date near it. Is it material?",
+            items.append(Item("consider", f"time|{s.name}|{e.kind}|{unit.label(e.at)}",
+                              f"{describe(e, unit)}; the report gives no {'time' if unit.sub_day else 'date'} near "
+                              "it. Is it material?",
                               score=min(1.0, share + (0.3 if e.kind in ("rise", "fall") else 0.1))))
     # Files never referenced.
     for table, t in idx.tables.items():
@@ -530,6 +567,78 @@ def consider_checks(idx: Index, rep: Report, text_lower: str) -> list[Item]:
     return items
 
 
+def _cited_rows(idx: Index, rep: Report) -> set[tuple[str, int]]:
+    rows = {(t, r) for t, r, _ in rep.refs}
+    rows |= {idx.id_lookup[i] for i, _ in rep.ids if i in idx.id_lookup}
+    for cid, _ in rep.units:
+        unit = idx.by_id.get(cid)
+        if unit is not None:
+            rows |= {(unit.table, r) for r in unit.members}
+    return rows
+
+
+def _covered(text: str, report_norm: str) -> bool:
+    """Whether the report already carries a passage's content: one of its key terms
+    (identifier-like tokens, CamelCase names, long words), or else most of its words."""
+    terms = {t.strip("./-").lower() for t in _KEY_TERM.findall(text) if len(t.strip("./-")) >= 5}
+    if terms:
+        return any(t in report_norm for t in terms)
+    words = {w for w in re.findall(r"[^\W_]{6,}", text.lower())}
+    return bool(words) and sum(1 for w in words if w in report_norm) >= max(1, len(words) // 2)
+
+
+def unused_checks(idx: Index, rep: Report) -> list[Item]:
+    """Material already surfaced to the agent that the report does not use: reader notes
+    (kept by the reading crew) whose record is not cited and whose content is not in the
+    report, and high-precision anomalies (look-alike identifiers, disguised mixed-script
+    words) the report does not mention."""
+    items: list[Item] = []
+    cited = _cited_rows(idx, rep)
+    seen_rows: set[tuple[str, int]] = set()
+    notes = []
+    for n in coverage.load_notes():
+        table, _, line = str(n.get("ref", "")).rpartition(":")
+        if table not in idx.tables or not line.isdigit():
+            continue
+        row = (table, int(line) - 1)
+        if row in cited or row in seen_rows:
+            continue
+        if _covered(f"{n.get('quote', '')} {n.get('note', '')}", rep.norm):
+            continue
+        seen_rows.add(row)
+        notes.append((NOTE_WEIGHT.get(n.get("kind"), 0.4), n))
+    notes.sort(key=lambda x: -x[0])
+    for w, n in notes[:MAX_UNUSED_NOTES]:
+        quote = " ".join(str(n.get("quote", "")).split()[:20])
+        items.append(Item("consider", f"note|{n['ref']}|{normalize(quote)[:60]}",
+                          f"a reader noted ({n.get('kind')}, {n.get('cite') or n['ref']}): {n.get('note', '').strip()} "
+                          f'— "{quote}". The report does not use it. Material to your account?',
+                          score=0.25 + 0.2 * w))
+    from .anomalies import lookalike_groups, mixed_script_tokens, skeleton
+
+    anomalies = []
+    groups = lookalike_groups(idx)
+    for g in groups:
+        kind, value, _stat = g["main"]
+        odd = [v for _, v, _ in g["odd"]]
+        if any(normalize(v) in rep.norm for v in odd) or (value.lower() in rep.norm and _LOOKALIKE_WORDS.search(rep.norm)):
+            continue
+        first = g["odd"][0][2].get("first")
+        where = f" (first {_ref(*first)})" if first else ""
+        anomalies.append(Item("consider", f"lookalike|{skeleton(value)}",
+                              f"look-alike identifier: {odd[0]!r}{where} imitates {value!r} ({kind}) with look-alike "
+                              "characters; the report does not mention it. Material? (atlas anomalies)", score=0.6))
+    names = {skeleton(g["main"][1]) for g in groups}
+    for x in mixed_script_tokens(idx):
+        if not x["disguised"] or skeleton(x["token"]) in names or normalize(x["token"]) in rep.norm:
+            continue
+        t, r = x["rows"][0]
+        anomalies.append(Item("consider", f"mixed|{skeleton(x['token'])}",
+                              f"mixed-script word {x['token']!r} (looks like {skeleton(x['token'])!r}; {_ref(t, r)}) is "
+                              "not mentioned. Material? (atlas anomalies)", score=0.5))
+    return items + anomalies[:MAX_UNUSED_ANOMALIES]
+
+
 def run(idx: Index, report_text: str, dismissed: set[str]) -> tuple[list[Item], list[Item]]:
     years = [p.fields[p.time_field].tmin.year for p in idx.profiles.values()
              if p.time_field and p.fields[p.time_field].tmin]
@@ -538,6 +647,7 @@ def run(idx: Index, report_text: str, dismissed: set[str]) -> tuple[list[Item], 
     hay = Haystack.build(idx)
     fixes, considers = fix_checks(idx, rep, hay)
     considers += consider_checks(idx, rep, rep.norm)
+    unused = unused_checks(idx, rep)
     def dedupe(items):
         seen, out = set(), []
         for i in items:
@@ -547,7 +657,11 @@ def run(idx: Index, report_text: str, dismissed: set[str]) -> tuple[list[Item], 
         return out
 
     fixes = dedupe(fixes)
-    considers = sorted(dedupe(considers), key=lambda i: -i.score)[:MAX_CONSIDER]
+    # Up to RESERVED slots go to material the agent already had in front of it (reader notes,
+    # anomalies) so coverage questions about a thin draft cannot crowd it out entirely.
+    unused = sorted(dedupe(unused), key=lambda i: -i.score)[:RESERVED]
+    rest = [i for i in sorted(dedupe(considers), key=lambda i: -i.score) if i.gid not in {u.gid for u in unused}]
+    considers = sorted(unused + rest[: MAX_CONSIDER - len(unused)], key=lambda i: -i.score)
     return fixes, considers
 
 

@@ -40,6 +40,28 @@ def record(cmd: str, args: list[str], opened=(), seen_rows=(), listed=(), read=(
         pass
 
 
+def notes_path() -> Path:
+    """Reader notes kept by the reading crew (one JSON object per line), next to the
+    coverage log unless ``$ATLAS_NOTES`` says otherwise."""
+    return Path(os.environ.get("ATLAS_NOTES", state_path().with_name("atlas-notes.jsonl")))
+
+
+def load_notes() -> list[dict]:
+    out = []
+    try:
+        with notes_path().open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    n = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(n, dict) and n.get("ref"):
+                    out.append(n)
+    except OSError:
+        pass
+    return out
+
+
 def load_read() -> set[str]:
     """Row refs read by readers of the reading crew (not by the agent itself)."""
     out: set[str] = set()

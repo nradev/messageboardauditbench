@@ -1294,3 +1294,128 @@ false-positive work, and I don't want a detector shaped by findings we know.
 disguised mixed-script word, a relative burst, skeleton equalities and
 non-equalities); a mock run in the real sandbox; full suite apart from the 2
 pre-existing `node` failures; ruff clean.
+
+## Step 20: R5-lite: every reader note kept (R5a), unused material in the gap check (R5b)
+
+The ledger (R5) was rescoped after the 30-minute analysis. A ledger the agent
+writes itself would depend on adoption. The measured losses were reader notes
+discarded by the output cap (about 25 of 423–558 per run reached the agent)
+and material the agent saw but left out of a capped report.
+
+**R5a: keep every verified note.**
+- `Crew.keep` stores each verified note (and each `ask` answer) once, keyed by
+  record and quote, with its kind, note, quote, ref, citation, source call and
+  whether the tool output showed it.
+- Notes are kept in memory for the new `crew notes` action, and appended to
+  `/tmp/atlas-notes.jsonl` in the sandbox, next to atlas's coverage log
+  (`coverage.notes_path()`, `$ATLAS_NOTES`), for the gap checker.
+- `crew notes [target=REGEX]` lists up to 30 notes matching the regex: those
+  not shown before first, then by kind (unexpected, outcomes, actions,
+  claims, answers, open questions, actors, times). Listed notes count as
+  shown, so calling again moves on.
+- `brief` and `sweep` outputs end with "N more verified notes from this call
+  are kept: crew notes …".
+- The crew prompt paragraph mentions `crew notes`.
+- Metadata `crew` gains `notes_kept` and `notes_shown`; `usage_metrics.py`
+  prints them.
+
+**R5b: unused material in `atlas gapcheck`** (`unused_checks`), Consider items
+only:
+- **Reader notes:** a stored note becomes an item when its record isn't
+  cited and its content isn't in the report.
+  - Cited means a file:line ref, the record's own id, or a cited cluster or
+    theme containing it.
+  - Content is in the report if a key term of the note or quote appears
+    (identifier-like tokens with digits, CamelCase names, long words), or,
+    failing those, most of its words.
+  - One item per record, ranked by kind: unexpected first. At most 3.
+  - Phrased as: "a reader noted (kind, citation): note — "quote". The report
+    does not use it. Material to your account?"
+- **Anomalies:**
+  - look-alike identifier groups the report doesn't mention (neither the
+    look-alike value, nor the plain value next to a word like
+    Cyrillic/look-alike/homoglyph/Unicode);
+  - disguised mixed-script words not already part of a look-alike group.
+
+  At most 2.
+- **Reserved slots:** up to 2 of the 8 Consider slots go to these items. The
+  sandbox mock showed why: on a thin draft, date and theme questions outscore
+  them and would crowd them out entirely.
+- **Fix:** unchanged, so the Fix precision gate is unaffected.
+
+**Also fixed (generic, found in the mock):** time events are now merged by
+(kind, day) across series. A file-level rise and the same rise in its
+dominant values took 6 of 8 Consider slots; the old dedupe needed an exact
+count match.
+
+**Checks:**
+- On the two 30-minute crew reports (no stored notes locally), the
+  look-alike item ranks first in both. The rest are themes, the deletion
+  fall, unsupported passages and a quote not found.
+- A full gap check takes about 5–6 s warm, against about 2 s before: the
+  look-alike and mixed-script scans.
+
+**Verified:**
+- 2 new tests:
+  - all verified notes kept once, shown flags, "more notes kept" line,
+    `crew notes` filter and bad-regex handling, no double storing;
+  - gapcheck flags an unused unexpected note and a look-alike, does not flag
+    a cited note, and clears both once the report uses them.
+- An autouse test fixture stubs the sandbox write.
+- A mock run in the real sandbox: brief, `crew notes`, a report not using the
+  note, then gapcheck. The note item and the look-alike item both appear.
+- 53 atlas and crew tests; full suite apart from the 2 pre-existing `node`
+  failures; ruff clean.
+
+## Step 21: an adaptive time unit instead of days
+
+The user asked whether one gap-check item "per kind and day" was arbitrary,
+e.g. for a corpus spanning one day. It was worse than that: the whole time
+module counted in calendar days. On Mythos 5 (one transcript of about 20
+hours), `atlas timeline` said only "first/last activity 2026-07-18" for every
+series. The gap checker treated a report that named the date once as "near"
+every event. Actor bursts were per day, so nothing within a day could show.
+On a multi-year corpus the opposite holds: days would be too fine.
+
+**The unit is chosen from the data** (`timeline.time_unit`): the finest of
+minute, 10 minutes, hour, 6 hours, day and week that the timestamps resolve
+(atlas's detected precision) and that splits the corpus span into at most 150
+buckets. Wiki (about 2 months): day, as before. Mythos 5: 10 minutes. Several
+years: week.
+
+**Everything time-based uses it:**
+- **`timeline`:** series are counted per unit; peaks, the 3-bucket rise/fall
+  means and quiet stretches (3+ empty buckets) are in units. Labels show
+  times for sub-day units ("peak at 2026-07-18 10:00–10:10"), and the header
+  names the unit.
+- **`gapcheck`:**
+  - For sub-day units it parses times of day in the report ("10:05",
+    "08:24:14"), each placed on the closest date mentioned before it, or on
+    the corpus's day when the corpus spans one day.
+  - An event counts as covered by a mention within 2 units. Day and week
+    units keep date matching (slack 1 day or 1 week).
+  - Time events are merged by (kind, bucket). Item keys use the unit's label,
+    so for day-unit corpora the keys and dismissals are unchanged.
+- **`anomalies`:** actor bursts are per unit ("in the 10 minutes from …").
+  Record bursts keep a one-hour window at every scale: with 10-minute
+  windows, Mythos 5's only record burst (20 copies of one command within an
+  hour) fell below the absolute threshold, and an hour is meaningful at any
+  scale.
+- **`expand`:** rows per unit ("per 10 minutes: 07:50 4, 08:00 1, …").
+
+**Results:**
+- **Mythos 5:** the timeline now shows a sharp rise around 07:30, a fall
+  around 11:30 and a quiet stretch 11:30–21:20 before a final record.
+- **Wiki:** output identical apart from the reworded rise/fall note ("the
+  mean over 3 days changes by about 198 rows per day"); gap-check item ids
+  unchanged.
+- **RubyHack:** no time field, unaffected.
+
+**Verified:**
+- A new atlas test: a 4-hour corpus is read in sub-day buckets, a 20-minute
+  surge is found as a peak, the gap checker flags it when the report gives
+  only the date, and clears it when the report mentions "10:05".
+- The anomalies test was updated for 6-hour buckets (hourly timestamps over
+  about 20 days).
+- 54 atlas and crew tests; full suite apart from the 2 pre-existing `node`
+  failures; ruff clean.
