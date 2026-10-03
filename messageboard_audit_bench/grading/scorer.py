@@ -1,6 +1,7 @@
 """The rubric judge, as an Inspect scorer.
 
-One sheet at a time, the same bytes the standalone grader sends, through Inspect's model
+Every sheet of a report is graded concurrently (results are combined in sheet order), with
+the same bytes the standalone grader sends, through Inspect's model
 layer instead of a hand-rolled thread pool — so the judge's calls land in the eval log,
 count against the run's token accounting, and obey `--max-connections` like everything
 else.
@@ -18,6 +19,7 @@ expensive way, after a lapsed Anthropic balance wrote 112 files recording a tota
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from inspect_ai.model import (
@@ -36,6 +38,21 @@ from messageboard_audit_bench.grading import core
 # Tried in order, dropping down when a provider rejects the level outright. Mirrors the
 # standalone grader's ladder.
 EFFORTS = ("xhigh", "high", "medium")
+JUDGE_EFFORTS = (*EFFORTS, "low")
+
+
+def effort_ladder(effort: str | None = None) -> tuple[str, ...]:
+    """The efforts to try, starting at ``effort`` (default: the full ladder from xhigh).
+
+    A lower starting effort is faster and cheaper but scores differently from the
+    published xhigh grades, so compare only grades made at the same effort.
+    """
+    if effort is None:
+        return EFFORTS
+    if effort not in JUDGE_EFFORTS:
+        raise ValueError(f"judge effort must be one of {', '.join(JUDGE_EFFORTS)}, not {effort!r}")
+    # Drop down only as far as the published ladder does (medium), unless asked for low.
+    return EFFORTS[EFFORTS.index(effort):] if effort in EFFORTS else ("low",)
 
 
 def _is_anthropic(model: Model) -> bool:
@@ -71,12 +88,13 @@ async def grade_sheet(
     report_md: str,
     templates: dict[str, str],
     variant: str | None = None,
+    efforts: tuple[str, ...] = EFFORTS,
 ) -> tuple[dict[str, dict], str]:
     """One sheet. Returns (claims, effort actually used); raises only if nothing parses."""
     spec = core.MODES[mode]
     system, prefix, suffix = core.build_prompt(mode, rubric_id, report_md, templates, variant)
     last: Exception | None = None
-    for effort in EFFORTS:
+    for effort in efforts:
         try:
             out = await model.generate(_messages(system, prefix, suffix), config=_config(model, effort))
         except Exception as exc:  # noqa: BLE001 — an effort the provider rejects, or a real error
@@ -102,7 +120,10 @@ async def grade_sheet(
 
 @scorer(metrics=[mean(), stderr()])
 def sheet_scorer(
-    rubric: str = "v2", judge: str | Model | None = None, variant: str | None = None
+    rubric: str = "v2",
+    judge: str | Model | None = None,
+    variant: str | None = None,
+    effort: str | None = None,
 ) -> Scorer:
     """Grade the report against every sheet of `rubric`.
 
@@ -113,7 +134,10 @@ def sheet_scorer(
         so `--model-role grader=openai/gpt-5.6-sol` works as it does for the other scorers.
       variant: a rubric variant (`core.VARIANTS`); the task derives it from the data
         variant, so a verbatim_anthropic run is judged against the swapped answer key.
+      effort: the judge's starting reasoning effort (default xhigh, as published; see
+        `effort_ladder`). The effort actually used is recorded per sheet.
     """
+    efforts = effort_ladder(effort)
     if rubric not in core.MODES:
         raise ValueError(f"unknown rubric {rubric!r}; expected one of {sorted(core.MODES)}")
     core.load_sheets(rubric, variant)  # Validate assets before launching an agent.
@@ -129,20 +153,31 @@ def sheet_scorer(
         per_claim: dict[str, dict] = {}
         per_rubric: dict[str, dict] = {}
         failures: dict[str, str] = {}
-        for spec in sets:
-            rubric_id = spec["rubric_id"]
-            try:
-                items, effort = await grade_sheet(
-                    model, rubric, rubric_id, report_md, templates, selected_variant
+        # All sheets at once (bounded by --max-connections); exceptions are kept per
+        # sheet and the results combined in sheet order, as the sequential loop did.
+        results = await asyncio.gather(
+            *(
+                grade_sheet(
+                    model, rubric, spec["rubric_id"], report_md, templates,
+                    selected_variant, efforts,
                 )
-            except Exception as exc:  # noqa: BLE001 — recorded, not raised: other sheets stand
-                failures[rubric_id] = f"{type(exc).__name__}: {exc}"[:300]
+                for spec in sets
+            ),
+            return_exceptions=True,
+        )
+        for spec, result in zip(sets, results, strict=True):
+            rubric_id = spec["rubric_id"]
+            if isinstance(result, BaseException):
+                if not isinstance(result, Exception):
+                    raise result  # cancellation and the like are not sheet failures
+                failures[rubric_id] = f"{type(result).__name__}: {result}"[:300]
                 continue
+            items, used_effort = result
             per_claim.update(items)
             per_rubric[rubric_id] = {
                 "score": round(sum(i["score"] for i in items.values()), 2),
                 "max": len(items),
-                "effort": effort,
+                "effort": used_effort,
             }
 
         # recorded bare, the way every existing grade file records it

@@ -293,7 +293,12 @@ def _inspect_sandbox(
     )
 
 
-def _scorers(judge: str, rubric: str | None, data_variant: str | None = None) -> list:
+def _scorers(
+    judge: str,
+    rubric: str | None,
+    data_variant: str | None = None,
+    judge_effort: str | None = None,
+) -> list:
     """Benchmark sheets plus diagnostic scores; legacy grading is explicit."""
     scorers = [process_metrics(), report_length()]
     if rubric == "legacy":
@@ -303,7 +308,9 @@ def _scorers(judge: str, rubric: str | None, data_variant: str | None = None) ->
     if len(modes) != len(set(modes)):
         raise ValueError("rubric must not contain duplicate modes")
     return [
-        sheet_scorer(rubric=mode, judge=judge, variant=variant_for_data(data_variant))
+        sheet_scorer(
+            rubric=mode, judge=judge, variant=variant_for_data(data_variant), effort=judge_effort
+        )
         for mode in modes
     ] + scorers
 
@@ -536,6 +543,7 @@ def _german_wiki_report(
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
     token_budget: int | None = None,
+    judge_effort: str | None = None,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -561,12 +569,15 @@ def _german_wiki_report(
             ``0`` to disable this continuation policy for an ablation.
         judge: Inspect model used to grade the report. A ``grader`` model role,
             when supplied to Inspect, takes precedence over this value.
+        judge_effort: The judge's starting reasoning effort (default ``xhigh``, as
+            published; ``medium`` is faster and cheaper for iteration but scores
+            differently).
         rubric: Comma-separated sheet modes; defaults to ``v2,tldrh`` (findings
             and the TL;DR summary). Use Inspect's ``--no-score`` to defer grading,
             or ``legacy`` for the old starter rubric.
         data_variant: Override the config's dataset, including
             ``verbatim_anthropic`` for the provider attribution ablation.
-        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``12.0``). The task
+        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``12.1``). The task
             refuses to run if this checkout is a different version; use
             ``scripts/run_eval.py --version`` to run another one.
         tools: Comma-separated investigation tools for ``agent=react``: ``atlas``, and
@@ -600,7 +611,7 @@ def _german_wiki_report(
         time_limit_minutes=time_limit_minutes,
         min_runtime_fraction=min_runtime_fraction,
         data_variant=data_variant,
-        scorers=_scorers(judge, rubric, variant),
+        scorers=_scorers(judge, rubric, variant, judge_effort),
         tools=tools,
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,
