@@ -71,3 +71,21 @@ def test_rejects_invalid_budgets(usage) -> None:
             OutputTokenBudget(bad)
     with pytest.raises(ValueError):
         OutputTokenBudget(1000, min_fraction=1)
+
+
+def test_provider_reported_cost_sums_openrouter_usage() -> None:
+    from inspect_ai.event import ModelEvent
+    from inspect_ai.model import GenerateConfig, ModelCall, ModelOutput
+
+    from messageboard_audit_bench.native import _provider_reported_cost
+
+    def event(usage):
+        return ModelEvent(
+            model="openrouter/z-ai/glm-5.3", input=[], tools=[], tool_choice="auto",
+            config=GenerateConfig(), output=ModelOutput(),
+            call=ModelCall(request={}, response={"usage": usage}),
+        )
+
+    events = [event({"cost": 0.25}), event({"cost": 0.125}), event({}), "not an event"]
+    assert _provider_reported_cost(events) == 0.375
+    assert _provider_reported_cost([event({})]) is None

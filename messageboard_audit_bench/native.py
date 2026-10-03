@@ -17,6 +17,7 @@ from copy import deepcopy
 from functools import wraps
 
 from inspect_ai.agent import Agent, AgentState, react, run
+from inspect_ai.event import ModelEvent
 from inspect_ai.log import transcript
 from inspect_ai.model import (
     ChatMessageAssistant,
@@ -354,6 +355,25 @@ def _usage_metadata(usages: Sequence[ModelUsage]) -> dict[str, int | float | str
     }
 
 
+def _provider_reported_cost(events: Sequence[object]) -> float | None:
+    """Sum the per-call cost the provider returned (OpenRouter's ``usage.cost``).
+
+    Inspect prices calls only for models in its own table, so OpenRouter models
+    such as GLM report no cost there. The raw responses are logged on native runs
+    and carry the billed amount, prompt caching included. ``None`` when no call
+    reported one.
+    """
+    total = None
+    for event in events:
+        if not isinstance(event, ModelEvent) or event.call is None:
+            continue
+        usage = (event.call.response or {}).get("usage")
+        cost = usage.get("cost") if isinstance(usage, dict) else None
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            total = (total or 0.0) + float(cost)
+    return total
+
+
 def _copy_agent_state(state: TaskState, agent_state: AgentState) -> None:
     state.messages = agent_state.messages
     if agent_state.output:
@@ -451,7 +471,6 @@ def _record_native_metrics(
         report_chars=len(report),
         turns=len(assistants),
         tool_calls=sum(len(m.tool_calls or []) for m in assistants),
-        cost_usd=state.cost_usage,
         wall_seconds=round(elapsed, 3),
         limit_exceeded=limit_error.type if limit_error else None,
         limit_value=limit_error.limit if limit_error else None,
@@ -470,6 +489,13 @@ def _record_native_metrics(
         post_tool_hook_fired=post_tool_hook_fired,
         stop_hook_fired=stop_hook_fired,
     )
+    provider_cost = _provider_reported_cost(transcript().events)
+    if state.cost_usage:
+        state.metadata.update(cost_usd=state.cost_usage, cost_source="inspect")
+    elif provider_cost is not None:
+        state.metadata.update(cost_usd=round(provider_cost, 6), cost_source="provider")
+    else:
+        state.metadata.update(cost_usd=state.cost_usage, cost_source=None)
     state.metadata.update(
         measure(
             report,

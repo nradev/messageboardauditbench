@@ -70,3 +70,23 @@ def test_other_models_keep_four_connection_default() -> None:
 
     assert result.returncode == 0
     assert "--max-connections 4" in result.stdout
+
+
+def test_time_budget_keeps_explicit_twenty_minute_default() -> None:
+    result = _dry_run("anthropic/claude-opus-5-5")
+
+    assert result.returncode == 0
+    assert "time_limit_minutes=20" in result.stdout
+    assert "token_budget" not in result.stdout
+
+
+def test_token_budget_leaves_backstop_to_the_config() -> None:
+    result = subprocess.run(
+        [str(SCRIPT), "--agent", "react", "--config", "blind-tokens", "--model",
+         "openrouter/z-ai/glm-5.3", "--token-budget", "75000", "--dry-run"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0
+    assert "token_budget=75000" in result.stdout
+    assert "time_limit_minutes" not in result.stdout
