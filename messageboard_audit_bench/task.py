@@ -89,6 +89,7 @@ from messageboard_audit_bench.investigation_tools import (
     parse_tools,
     prompt_addendum,
 )
+from messageboard_audit_bench.ledger_writer import LEDGER_PROMPT
 from messageboard_audit_bench.native import inspect_native_agent
 from messageboard_audit_bench.report_length import (
     acceptance_limits,
@@ -302,6 +303,7 @@ def _audit_task(
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
+    ledger_writer: bool = False,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -343,6 +345,8 @@ def _audit_task(
         raise ValueError("gapcheck_at needs tools=atlas and a budget share between 0 and 1 (e.g. 0.6)")
     if sweep_at_start and "crew" not in investigation_tools:
         raise ValueError("sweep_at_start needs tools=atlas,crew")
+    if ledger_writer and (agent != "react" or backend != "inspect" or "atlas" not in investigation_tools):
+        raise ValueError("ledger_writer needs agent=react, backend=inspect and tools=atlas")
     if policy_aware_continue and (agent != "react" or backend != "inspect"):
         raise ValueError("policy_aware_continue is only supported with agent=react and backend=inspect")
     budget_min = _time_limit(time_limit_minutes, int(cfg["budget_min"]))
@@ -382,6 +386,8 @@ def _audit_task(
         sample_metadata["gapcheck_at"] = float(gapcheck_at)
     if sweep_at_start:
         sample_metadata["sweep_at_start"] = True
+    if ledger_writer:
+        sample_metadata["ledger_writer_enabled"] = True
     if investigation_tools:
         sample_metadata["investigation_tools"] = list(investigation_tools)
         sample_metadata["investigation_tools_prompt"] = prompt_addendum(investigation_tools)
@@ -390,7 +396,8 @@ def _audit_task(
         sample_metadata["subscription_model"] = subscription_model
     sample = Sample(
         input=_prompt_for(config, budget_min, runtime_fraction, benchmark_id, allow_drafts)
-        + prompt_addendum(investigation_tools),
+        + prompt_addendum(investigation_tools)
+        + (LEDGER_PROMPT if ledger_writer else ""),
         id=f"{agent}:{backend}:{config}:{budget_min}m"
         + "".join(f"+{t}" for t in investigation_tools),
         metadata=sample_metadata,
@@ -408,6 +415,7 @@ def _audit_task(
             policy_aware_continue_enabled=policy_aware_continue,
             gapcheck_at=float(gapcheck_at) if gapcheck_at is not None else None,
             sweep_at_start=bool(sweep_at_start),
+            ledger_writer=ledger_writer,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -488,6 +496,7 @@ def _german_wiki_report(
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
+    ledger_writer: bool = False,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -532,6 +541,8 @@ def _german_wiki_report(
         sweep_at_start: With ``tools=atlas,crew``: start a ``crew sweep`` in the background
             when the agent starts, and hand its digest to the agent (framed as leads to
             confirm) on the first turn after it finishes. Default off.
+        ledger_writer: With ``agent=react,tools=atlas``: reserve 24% of the budget
+            for a fresh final writer using the draft and an evidence ledger. Default off.
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -551,6 +562,7 @@ def _german_wiki_report(
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,
         sweep_at_start=sweep_at_start,
+        ledger_writer=ledger_writer,
     )
 
 
@@ -593,6 +605,7 @@ def _transluce_report(
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
+    ledger_writer: bool = False,
 ) -> Task:
     """Run one sandboxed Transluce report trial on the pinned urlquery.net snapshot.
 
@@ -627,6 +640,7 @@ def _transluce_report(
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,
         sweep_at_start=sweep_at_start,
+        ledger_writer=ledger_writer,
         scorers=[
             finding_scorer(judge=judge, effort=judge_effort, article_context=article_context),
             process_metrics(),

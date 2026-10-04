@@ -138,15 +138,19 @@ GAPCHECK_FRAMING = (
 )
 
 
-async def auto_gapcheck() -> tuple[str | None, dict]:
-    """Run `atlas gapcheck` on the draft report. Returns (message for the agent, metadata),
-    or (None, {...}) when there is no report yet, so the caller can try again later."""
-    result = await sandbox().exec([ATLAS_BIN, "gapcheck", "/work/report.md"], timeout=120)
+async def gapcheck_report(report_path: str) -> tuple[str | None, dict]:
+    """Run `atlas gapcheck` on a report and return its message and item counts."""
+    result = await sandbox().exec([ATLAS_BIN, "gapcheck", report_path], timeout=120)
     out = (result.stdout or "").strip()
     m = re.search(r": (\d+) to fix, (\d+) to consider", out.splitlines()[0] if out else "")
     if not result.success or not m:
         return None, {"error": (out or result.stderr or "")[:300]}
     return GAPCHECK_FRAMING + out, {"fix": int(m.group(1)), "consider": int(m.group(2))}
+
+
+async def auto_gapcheck() -> tuple[str | None, dict]:
+    """Check the draft; a missing report returns metadata so the caller can retry."""
+    return await gapcheck_report("/work/report.md")
 
 
 async def read_atlas_coverage() -> list[dict]:
