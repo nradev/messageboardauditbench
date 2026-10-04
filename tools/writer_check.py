@@ -39,10 +39,11 @@ def main() -> None:
     ap.add_argument("log")
     ap.add_argument("--sample", type=int, default=0, help="index of the sample in the log")
     ap.add_argument("--level", default="W1", choices=fw.LEVELS)
+    ap.add_argument("--strength", default="edit", choices=fw.STRENGTHS)
     ap.add_argument("--data", required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--provider", help="pin an OpenRouter provider, no fallbacks")
-    ap.add_argument("--max-tokens", type=int, default=20000)
+    ap.add_argument("--max-tokens", type=int, default=20000, help="the writer's token allowance (the reserve)")
     ap.add_argument("--out", help="write the final report here")
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
@@ -68,15 +69,27 @@ def main() -> None:
 
     model_args = {"provider": {"order": [args.provider], "allow_fallbacks": False}} if args.provider else {}
     model = get_model(args.model, **model_args)
+    used = [0]  # the writer's own output tokens, taken from the allowance as in a run
+
+    class Counting:
+        async def generate(self, messages, config=None):
+            out = await model.generate(messages, config=config)
+            used[0] += (out.usage.output_tokens or 0) if out.usage else 0
+            return out
+
+        def __str__(self):
+            return str(model)
+
     fw._write = write
     fw._atlas_json = atlas_json
-    fw.get_model = lambda role=None, default=None: model
+    fw.get_model = lambda role=None, default=None: Counting()
     print(f"[{len(notes)} reader notes from the log]")
     res = asyncio.run(fw.run_writer(
         args.level, prompt, draft,
         min_words=int(sample.metadata.get("report_min_words") or 0),
         max_words=int(sample.metadata.get("report_max_words") or 0),
-        tokens_left=lambda: args.max_tokens, deadline=time.monotonic() + 900, install=False))
+        tokens_left=lambda: max(0, args.max_tokens - used[0]), deadline=time.monotonic() + 900, install=False,
+        strength=args.strength))
     print(json.dumps(res.meta, indent=1))
     print(f"\n[inputs and candidate in {work}]")
     if res.report is not None:

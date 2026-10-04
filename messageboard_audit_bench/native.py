@@ -653,6 +653,7 @@ def inspect_native_agent(
     writer: str | None = None,
     writer_tokens: int = 0,
     writer_seconds: int = 0,
+    writer_strength: str = "edit",
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -935,6 +936,7 @@ def inspect_native_agent(
                     deadline=max(started + time_limit_seconds + writer_seconds,
                                  time.monotonic() + WRITER_MIN_SECONDS),
                     install="atlas" not in investigation_tools,
+                    strength=writer_strength,
                 )
                 state.metadata["writer"] = {**result.meta, "reserve_tokens": writer_tokens,
                                             "reserve_seconds": writer_seconds}

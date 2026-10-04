@@ -355,6 +355,8 @@ done; wait
 ```
 
 For crew arms, use W2 or W3 with `-T tools=atlas,crew -T sweep_at_start=true`.
+`-T writer_strength=rebalance` or `rewrite` lets the writer depart further from
+the draft (default `edit`); `tools/writer_check.py --strength` tries them offline.
 The outcome is in each sample's `writer` metadata. When the writer replaced the
 report, the draft is in `writer_draft_report`, so the draft and the final report
 can be graded side by side.

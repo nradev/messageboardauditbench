@@ -76,6 +76,7 @@ from messageboard_audit_bench.benchmarks import (
 )
 from messageboard_audit_bench.configs import CONFIG_NAME, load_config
 from messageboard_audit_bench.final_writer import LEVELS as WRITER_LEVELS
+from messageboard_audit_bench.final_writer import STRENGTHS as WRITER_STRENGTHS
 from messageboard_audit_bench.grading.core import SINGLE_CALL_MODES, variant_for_data
 from messageboard_audit_bench.grading.finding_scorer import finding_scorer
 from messageboard_audit_bench.grading.scorer import sheet_scorer
@@ -340,6 +341,7 @@ def _audit_task(
     token_budget: int | None = None,
     writer: str | None = None,
     writer_reserve: float = 0.1,
+    writer_strength: str = "edit",
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -401,6 +403,8 @@ def _audit_task(
             raise ValueError(f"writer must be one of {', '.join(WRITER_LEVELS)}")
         if agent != "react" or backend != "inspect":
             raise ValueError("writer is only supported with agent=react and backend=inspect")
+        if writer_strength not in WRITER_STRENGTHS:
+            raise ValueError(f"writer_strength must be one of {', '.join(WRITER_STRENGTHS)}")
         if not 0 < float(writer_reserve) < 0.5:
             raise ValueError("writer_reserve must be a budget share between 0 and 0.5 (e.g. 0.1)")
         if budget_tokens is not None:
@@ -458,6 +462,7 @@ def _audit_task(
     if writer is not None:
         sample_metadata["writer"] = writer
         sample_metadata["writer_reserve"] = float(writer_reserve)
+        sample_metadata["writer_strength"] = writer_strength
         sample_metadata["agent_budget"] = (
             {"tokens": agent_tokens} if budget_tokens is not None else {"minutes": agent_min}
         )
@@ -474,7 +479,8 @@ def _audit_task(
         + prompt_addendum(investigation_tools),
         id=f"{agent}:{backend}:{config}:{budget_label}"
         + "".join(f"+{t}" for t in investigation_tools)
-        + (f"+writer-{writer}" if writer is not None else ""),
+        + (f"+writer-{writer}" if writer is not None else "")
+        + (f"-{writer_strength}" if writer is not None and writer_strength != "edit" else ""),
         metadata=sample_metadata,
     )
     if backend == "inspect":
@@ -494,6 +500,7 @@ def _audit_task(
             writer=writer,
             writer_tokens=writer_tokens,
             writer_seconds=writer_seconds,
+            writer_strength=writer_strength,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -580,6 +587,7 @@ def _german_wiki_report(
     judge_single_call: bool = False,
     writer: str | None = None,
     writer_reserve: float = 0.1,
+    writer_strength: str = "edit",
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -643,6 +651,10 @@ def _german_wiki_report(
             The draft is kept if the rewrite fails its checks. Default off.
         writer_reserve: Share of the budget (tokens, or minutes on a time budget) kept for
             the writer; the agent is given and told the rest. Default ``0.1``.
+        writer_strength: How far the writer may depart from the draft: ``edit`` (light
+            edits, the default), ``rebalance`` (cut less important material to make room
+            for material the draft leaves out) or ``rewrite`` (a fresh report built around
+            the most important findings of all inputs).
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -665,6 +677,7 @@ def _german_wiki_report(
         token_budget=token_budget,
         writer=writer,
         writer_reserve=writer_reserve,
+        writer_strength=writer_strength,
     )
 
 

@@ -1769,3 +1769,54 @@ writer had been offered. Now:
 - `writer_check.py` loads `crew_notes` into its notes file. Which notes atlas showed is
   rebuilt from the `notes-shown` entries in `atlas_coverage`.
 - Logs from before this change have no notes.
+
+## Step 26: writer strength, length by deletion, and the first offline tries
+
+**First offline try** (`writer_check.py`, W3, GLM via wafer, atlas-200k sample 0; the draft
+was 2,993 words with 0 Fix items):
+- The writer ran 2 calls, 14.5k output tokens and 88 s.
+- It replaced the draft after one repair: the repair moved a quote cited to the wrong
+  record onto the record that holds it.
+- It worked as a careful editor:
+  - same headings, same timeline;
+  - 20 to 29 distinct `table:row` citations, mostly taken from the excerpts;
+  - no new findings: the draft was at the cap and nothing was displaced.
+
+**Changes:**
+- **`writer_strength=edit|rebalance|rewrite`.** Only the first rule of the system prompt
+  changes. `rebalance` makes room for material the draft leaves out, and `rewrite` builds
+  the report around the most important findings of all inputs. The default is `edit`.
+  The strength is recorded in metadata and, when it isn't `edit`, in the sample id
+  (`+writer-W3-rewrite`).
+- **The first call is capped at 60% of the tokens left**, so a repair call always has room.
+  In the first try, the two calls used 14.5k of a 20k reserve; with the old split, a
+  repair could have hit the 4k floor and come back empty.
+- **Length is fixed by deletion, not regeneration.** Stronger strengths wrote about 3,330
+  words although asked for 2,700, and a full repair call (6–7k tokens) didn't cut enough.
+  Now:
+  - The model gets the report as numbered units (paragraphs and list items) with word
+    counts; headings and the summary section are fixed.
+  - It replies with the numbers of the units to delete.
+  - Code deletes them in that order until the report is just under the limit (limit
+    minus 1%, at least 20 words), never below the minimum. That's up to two rounds.
+  - The full repair call is kept for content problems only (new Fix items, refs outside
+    the inputs).
+  - The first version trimmed to the 90% target and lost about 300 words of room. Another
+    version applied every named unit and went below the minimum (1,647 words). Both are
+    fixed.
+- **Refs named in a repair message count as inputs.** A Fix item says where a misattributed
+  quote really is; the writer cited that record, and the check then flagged it as unseen.
+- **New rule for every strength:** quotes must match exactly. When a Consider item asks for
+  support that isn't in the inputs, the writer adds no citation and keeps, marks or cuts
+  the passage instead. A rebalance run had invented "revisions:2556–2558" for an uncited
+  passage, and the check caught it.
+
+**Offline results after the changes** (the same draft, W3):
+
+| Strength | Calls | Output tokens | Outcome | Words |
+|---|---|---|---|---|
+| edit | 2 (1 trim) | 8.1k | replaced | 2,951 |
+| rebalance | 2 (1 trim) | 7.4k | replaced | 2,938 |
+| rewrite | 2 (1 trim) | 7.7k | replaced | 2,950 |
+
+The first replies were 3,054–3,173 words, so a trim of 5–9 units brought each under the limit.

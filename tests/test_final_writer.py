@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from types import SimpleNamespace
 
@@ -65,7 +66,7 @@ CLEAN = {"fix": 0, "new_fix": [], "refs_outside": []}
 def test_inputs_hold_the_draft_gapcheck_notes_and_limits():
     text = fw.build_inputs("Task text.", DRAFT, PACK, 100, 3000)
     for part in ("Task text.", DRAFT.strip(), "1 to fix", "editing /etc/hosts", "at most 3,000 words",
-                 "at least 100"):
+                 "at least 100", "aim for about 2,700"):
         assert part in text
     assert "Corpus map" not in text and "Excerpts" not in text  # absent sections are left out
     w3 = fw.build_inputs("T", DRAFT, {**PACK, "cited": [{"ref": "posts:1", "text": "body: x"}], "map": "themes"},
@@ -87,26 +88,83 @@ def test_clean_rewrite_replaces_the_draft(monkeypatch):
     assert written[fw.DRAFT_PATH] == DRAFT and "editing /etc/hosts" in written[fw.INPUTS_PATH]
     assert res.meta["calls"] == 1 and res.meta["output_tokens"] == 300 and res.meta["notes_given"] == 1
     assert res.meta["notes"] == PACK["notes"]  # what the writer was offered, for auditing
-    assert model.configs[0].max_tokens == 20000
+    assert model.configs[0].max_tokens == 12000  # 60% of what is left: room for a repair call
     assert "installed" not in written
 
 
 def test_one_repair_then_accept(monkeypatch):
     bad = {"fix": 1, "new_fix": ['"x y z" is not in posts:2'], "refs_outside": ["posts:9"]}
-    model, _ = _setup(monkeypatch, ["<report># A (posts:9)</report>", "<report># B (posts:1)</report>"], [bad, CLEAN])
+    model, written = _setup(monkeypatch, ["<report># A (posts:9)</report>", "<report># B (posts:1)</report>"],
+                            [bad, CLEAN])
+    written_inputs = []
+    orig_write = fw._write
+
+    async def track(path, text):
+        if path == fw.INPUTS_PATH:
+            written_inputs.append(text)
+        await orig_write(path, text)
+
+    monkeypatch.setattr(fw, "_write", track)
     res = _run()
     assert res.report == "# B (posts:1)" and res.meta["calls"] == 2
     repair = model.calls[1][-1].content
     assert "is not in posts:2" in repair and "posts:9" in repair
+    assert written_inputs[-1].endswith(repair.strip())  # refs named in the repair count as inputs
     assert len(res.meta["first_issues"]) == 2
 
 
-def test_problems_that_remain_keep_the_draft(monkeypatch):
-    long = "<report># R\n\n" + "word " * 80 + "</report>"
-    _setup(monkeypatch, [long, long], [CLEAN, CLEAN])
+LONG = ("<report># R\n\n## TL;DR\n\nThe summary stays.\n\n## Findings\n\n" + "keep " * 20 + "\n\n- "
+        + "minor " * 30 + "\n- " + "also " * 10 + "\n</report>")
+
+
+def test_units_fix_headings_and_the_summary():
+    us = fw.units(fw.extract_report(LONG))
+    free = [k for k, u in enumerate(us) if not u["fixed"]]
+    texts = ["\n".join(us[k]["lines"]).strip() for k in free]
+    assert len(free) == 3 and texts[1].startswith("- minor") and texts[2].startswith("- also")
+    assert all("summary stays" not in t for t in texts)
+    report, removed = fw.apply_trim(us, f"0, {free[1]}", target=40)  # a fixed unit is never deleted
+    assert removed == 1 and "minor" not in report and report.startswith("# R") and "summary stays" in report
+    # In the reply's order, stopping at the target, never below the floor.
+    report, removed = fw.apply_trim(us, f"{free[2]}, {free[1]}, {free[0]}", target=50)
+    assert removed == 2 and "keep" in report and fw.count_words(report) <= 50
+    report, removed = fw.apply_trim(us, f"{free[1]}, {free[0]}", target=10, floor=35)
+    assert removed == 1 and "keep" in report and "minor" not in report
+    assert "[" + str(free[1]) + "] (31 words)" in fw.trim_prompt(fw.extract_report(LONG), us, 20)
+
+
+def test_overlong_report_is_trimmed_by_deleting_chosen_units(monkeypatch):
+    def pick(prompt_text):
+        return re.search(r"\[(\d+)\] \(31 words\)", prompt_text).group(1)
+
+    model, _ = _setup(monkeypatch, [LONG], [CLEAN, CLEAN])
+    orig = model.generate
+
+    async def gen(messages, config=None):
+        if messages[0].content.startswith("This report has"):
+            model.calls.append(list(messages))
+            text = pick(messages[0].content)
+            return SimpleNamespace(completion=text, message=None, usage=SimpleNamespace(input_tokens=10, output_tokens=5))
+        return await orig(messages, config)
+
+    model.generate = gen
     res = _run()
-    assert res.report is None and res.meta["status"] == "kept_draft"
-    assert "above the limit of 50" in res.meta["issues"][0]
+    assert res.meta["status"] == "replaced" and res.meta["trims"] == 1 and res.meta["units_deleted"] == 1
+    assert "minor" not in res.report and "keep" in res.report and res.meta["final_words"] <= 50
+    assert "above the limit of 50" in res.meta["first_issues"][0]
+
+
+def test_trimming_that_does_not_reach_the_limit_keeps_the_draft(monkeypatch):
+    model, _ = _setup(monkeypatch, [LONG, "nothing", "nothing"], [CLEAN])
+    res = _run()
+    assert res.report is None and res.meta["trims"] == 2 and res.meta["reason"] == "outside the word limits"
+
+
+def test_other_problems_get_only_one_repair(monkeypatch):
+    bad = {"fix": 1, "new_fix": ["x"], "refs_outside": []}
+    model, _ = _setup(monkeypatch, ["<report># A</report>", "<report># B</report>"], [bad, bad])
+    res = _run()
+    assert res.meta["status"] == "kept_draft" and res.meta["repairs"] == 1 and len(model.calls) == 2
 
 
 @pytest.mark.parametrize("replies,status", [
@@ -139,11 +197,14 @@ def test_task_options_split_the_budget():
     s = g(agent="react", config="blind-tokens", token_budget=200000, writer="W1").dataset[0]
     assert s.metadata["agent_budget"] == {"tokens": 180000} and "180,000 output tokens" in s.input
     assert s.id.endswith("+writer-W1")
-    s = g(agent="react", time_limit_minutes=30, tools="atlas", writer="W3", writer_reserve=0.2).dataset[0]
+    s = g(agent="react", time_limit_minutes=30, tools="atlas", writer="W3", writer_reserve=0.2,
+          writer_strength="rewrite").dataset[0]
+    assert s.id.endswith("+writer-W3-rewrite") and s.metadata["writer_strength"] == "rewrite"
     assert s.metadata["agent_budget"] == {"minutes": 24} and "24 minutes" in s.input
     plain = g(agent="react", config="blind-tokens", token_budget=200000).dataset[0]
     assert "writer" not in plain.metadata and "200,000 output tokens" in plain.input
-    for bad in (dict(writer="W4"), dict(writer="W1", writer_reserve=0.6), dict(writer="W1", agent="claude")):
+    for bad in (dict(writer="W4"), dict(writer="W1", writer_reserve=0.6), dict(writer="W1", agent="claude"),
+                dict(writer="W1", writer_strength="heavy")):
         with pytest.raises(ValueError):
             g(**{"agent": "react", "time_limit_minutes": 30, **bad})
 
@@ -196,3 +257,30 @@ async def test_solver_runs_the_writer_after_the_agent_and_keeps_the_draft(monkey
     assert state.output.completion.startswith("# Final")
     assert state.metadata["writer_draft_report"] == DRAFT
     assert state.metadata["writer"]["status"] == "replaced" and state.metadata["writer"]["reserve_seconds"] == 60
+
+
+def test_strength_sets_the_approach_rule_only(monkeypatch):
+    prompts = {k: fw.system_prompt(k) for k in fw.STRENGTHS}
+    assert "Keep every supported finding" in prompts["edit"]
+    assert "make room" in prompts["rebalance"] and "Write the report anew" in prompts["rewrite"]
+    shared = prompts["edit"].split(fw.APPROACH["edit"])[1]
+    assert all(p.endswith(shared) for p in prompts.values())  # the other rules are the same
+    model, _ = _setup(monkeypatch, ["<report># R</report>"], [CLEAN])
+    res = _run(strength="rewrite")
+    assert res.meta["strength"] == "rewrite" and "Write the report anew" in model.calls[0][0].content
+
+
+def test_repair_call_gets_the_rest_of_the_allowance(monkeypatch):
+    left = [20000]
+    bad = {"fix": 1, "new_fix": ["x"], "refs_outside": []}
+    model, _ = _setup(monkeypatch, ["<report># A</report>", "<report># B</report>"], [bad, CLEAN])
+    orig = model.generate
+
+    async def spend(messages, config=None):
+        out = await orig(messages, config)
+        left[0] -= 11000
+        return out
+
+    model.generate = spend
+    _run(tokens_left=lambda: left[0])
+    assert [c.max_tokens for c in model.configs] == [12000, 9000]

@@ -210,9 +210,21 @@ investigate: it may cite only refs that appear in its inputs.
   20 records the agent read at length but did not cite, and a short corpus map of
   overview, timeline and anomalies, marked as context only (W3). The gap check ignores
   the agent's dismissals; Consider items stay optional.
-- **Checks** (`atlas writer check`): Fix items the draft did not have, cited refs that
-  appear nowhere in the inputs, and the word limits. One repair call gets the problems;
-  if any remain, the draft stays.
+- **Strength** (`-T writer_strength=edit|rebalance|rewrite`, default `edit`): how far
+  the writer may depart from the draft. `edit` keeps the draft's findings and tightens;
+  `rebalance` cuts less important material to make room for material the draft leaves
+  out; `rewrite` builds a fresh report around the most important findings of all inputs.
+  Only the first rule of the system prompt changes.
+- **Checks** (`atlas writer check`): Fix items the draft did not have and cited refs that
+  appear nowhere in the inputs get one repair call (refs named in the repair message then
+  count as inputs). If problems remain, the draft stays.
+- **Length**: the writer is asked to aim for 90% of the limit, but models overshoot. An
+  overlong report is not regenerated. Instead the model is shown it as numbered
+  paragraphs and list items, with word counts, and replies with the numbers of the least
+  important ones. Those are deleted in code, in its order, until the report is just under
+  the limit and never below the minimum; headings and the summary stay. That's up to two
+  rounds, each a few hundred output tokens. A deletion can't add an unsupported claim,
+  and the report is checked again anyway.
 - **Never fails the sample**: an empty reply, a timeout, a provider error or anything else
   keeps the draft. The outcome is in `writer` metadata (status, reason, calls, tokens,
   seconds, counts of inputs, the reader notes it was given, Fix items before and after, word
@@ -221,7 +233,8 @@ investigate: it may cite only refs that appear in its inputs.
   `/work/report.draft.md`.
 - **Budget**: `writer_reserve` (default 0.1) comes out of the trial budget, so arms with
   and without a writer spend the same total. On a token budget the writer gets what is
-  left of the total, at least 4,000 tokens per call. On a time budget it gets the reserved
+  left of the total, at least 4,000 tokens per call. The first call gets at most 60%
+  of what is left, so a repair always has room. On a time budget it gets the reserved
   minutes, at least 2.
 - **Model**: the `writer` model role if given, else the agent's model.
 - **Offline check**: `tools/writer_check.py` runs the writer on a finished sample's
