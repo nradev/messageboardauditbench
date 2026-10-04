@@ -461,3 +461,48 @@ def test_time_unit_adapts_to_the_corpus_span_and_gapcheck_matches_times(tmp_path
                       "(log:130).\n")
     assert cli.main(["gapcheck", str(report), "--data", str(d)]) == 0
     assert "peak at 2026-03-05 10:" not in capsys.readouterr().out
+
+
+def test_writer_pack_levels_and_no_coverage_entries(corpus, tmp_path, capsys):
+    notes = [{"kind": "actions", "note": "Edited the hosts file to bypass the gate.", "quote": "editing /etc/hosts to point",
+              "ref": "posts:81", "cite": "posts:81 (id=r80)", "shown": False},
+             {"kind": "times", "note": "A heartbeat.", "quote": "heartbeat ok seq 41", "ref": "posts:42",
+              "cite": "posts:42", "shown": False}]
+    (tmp_path / "atlas-notes.jsonl").write_text("".join(json.dumps(n) + "\n" for n in notes))
+    args = ["--data", str(corpus)]
+    assert cli.main(["show", "posts:42", *args]) == 0  # the agent read posts:42 at length
+    capsys.readouterr()
+    before = (tmp_path / "state.jsonl").read_text()
+    draft = tmp_path / "draft.md"
+    draft.write_text('# Report\n\nThe nightly job ran: "Status report for the nightly batch job" (posts:1).\n\n'
+                     'Invented: "the operator ordered every agent to stop at once" (posts:3).\n')
+    packs = {}
+    for level in ("W1", "W2", "W3"):
+        assert cli.main(["writer", "pack", str(draft), "--level", level, *args]) == 0
+        packs[level] = json.loads(capsys.readouterr().out)
+    assert packs["W1"]["fix"] == 1 and "the operator ordered" in packs["W1"]["gapcheck"]
+    assert packs["W1"]["notes"] == [] and packs["W1"]["cited"] == [] and packs["W1"]["map"] == ""
+    assert len(packs["W2"]["notes"]) == 2 and packs["W2"]["cited"] == []
+    w3 = packs["W3"]
+    assert [c["ref"] for c in w3["cited"]] == ["posts:1", "posts:3"]
+    assert [c["ref"] for c in w3["opened"]] == ["posts:42"]  # read at length, not cited
+    assert "Status report" in w3["cited"][0]["text"] and "atlas overview" in w3["map"]
+    assert (tmp_path / "state.jsonl").read_text() == before  # the writer is not the agent's coverage
+    assert cli.main(["writer", "pack", str(draft), "--level", "W9", *args]) == 0
+    assert "error" in json.loads(capsys.readouterr().out)
+
+
+def test_writer_check_new_fix_items_and_refs_outside_the_inputs(corpus, tmp_path, capsys):
+    draft = tmp_path / "draft.md"
+    draft.write_text('# Report\n\nBad quote: "the operator ordered every agent to stop at once" (posts:3).\n')
+    inputs = tmp_path / "inputs.md"
+    inputs.write_text(draft.read_text() + "\nA reader noted: editing /etc/hosts [posts:81]\n")
+    cand = tmp_path / "final.md"
+    cand.write_text('# Report\n\nBad quote: "the operator ordered every agent to stop at once" (posts:3).\n\n'
+                    'Hosts: "editing /etc/hosts to point a host name at 10.0.0.5" (posts:81).\n\n'
+                    'New and wrong: "the gate was disabled by the administrator team" (posts:7).\n')
+    assert cli.main(["writer", "check", str(cand), "--draft", str(draft), "--inputs", str(inputs),
+                     "--data", str(corpus)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["fix"] == 2 and len(out["new_fix"]) == 1 and "administrator" in out["new_fix"][0]
+    assert out["refs_outside"] == ["posts:7"]

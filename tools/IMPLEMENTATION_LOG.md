@@ -1681,3 +1681,91 @@ each tool's `required` list.
 output tokens (`token_budget.sample_output_tokens`). Tool output is input to later turns,
 so repeated gap checks don't draw on the budget directly. They cost only the agent's short
 tool calls and any reply to them.
+
+## Step 25: the final writer
+
+This step builds the plan in TOOL_IDEAS.md ("Plan: final writer"). It has not been run yet.
+
+**Atlas** (`writer.py`, hidden command `writer`):
+- **`writer pack DRAFT --level L`** gives the writer's inputs as JSON:
+  - W1: the draft's gap check, formatted;
+  - W2: the reader notes the draft does not use, with the same coverage test and ranking as
+    the gap check's unused items, up to 30;
+  - W3: excerpts of up to 40 cited records and 20 records the agent read at length but did
+    not cite (800 characters each, by salience), plus a map. The map is overview, timeline
+    and anomalies, capped at about 9k characters.
+- **`writer check REPORT --draft D --inputs F`** gives the Fix items the rewrite has and the
+  draft did not (by item id), and the refs it cites that appear nowhere in the inputs.
+- Neither command writes to the coverage log: the map commands run with recording turned
+  off.
+- Both ignore the agent's gap-check dismissals. On a real 200k atlas draft, 11 dismissals
+  had emptied the gap check, though 7 Consider items applied. The agent dismisses items to
+  quiet repeated checks, while the writer weighs them afresh, and Consider items stay
+  optional.
+
+**Host** (`final_writer.py`):
+- `run_writer` writes the draft to `/work/report.draft.md`, runs `pack`, and builds the
+  inputs:
+  - the task prompt, with its report requirements; the parts about tools and budget are
+    marked as not applying to the writer;
+  - the word limits, the draft and the gap check;
+  - notes, excerpts and the map, depending on the level.
+- **The call:** one model call with a fixed system prompt:
+  - keep the supported findings, most important first;
+  - correct Fix items;
+  - optional material only if it is material and supported;
+  - cite only refs in the inputs and quote verbatim;
+  - no outside knowledge; mark inferences;
+  - the map is context only;
+  - reply between `<report>` tags.
+- **The checks:** new Fix items, refs outside the inputs and the word limits. One repair call
+  gets the problems as a list, and the draft is kept if any remain.
+- **Fallback:** any exception, empty reply or timeout keeps the draft, with the status and
+  reason recorded.
+
+**Solver** (`native.py`):
+- After the agent loop and the overlong-report correction, and unless the agent refused,
+  the solver:
+  1. cancels the background sweep;
+  2. records atlas coverage, so the agent's coverage is taken before the writer;
+  3. runs the writer;
+  4. writes the result to `/work/report.md`.
+- Atlas is installed for the writer when the agent had no tools, so a baseline-plus-writer
+  arm is possible.
+- **Budget:**
+  - On a token budget, the writer's allowance is the total minus everything used so far
+    (agent, readers, writer), with a floor of 4,000 tokens per call. The deadline is the
+    agent's time limit plus the reserve, or at least 2 minutes from now.
+  - The writer's tokens are counted like every model's, through `sample_model_usage`.
+
+**Task** (`task.py`):
+- `writer=W1|W2|W3` and `writer_reserve=0.1`.
+- The reserve comes out of the trial budget. The agent's `OutputTokenBudget` and prompt get
+  the rest, e.g. 180,000 of 200,000 tokens, or 27 of 30 minutes. The writer gets the
+  difference.
+- The sample id gets `+writer-W1`, and the metadata records `writer`, `writer_reserve` and
+  `agent_budget`.
+- Only the German wiki task exposes the options so far. `_audit_task` takes them for any
+  benchmark.
+
+**Tests:**
+- `tests/test_final_writer.py` (11 tests): the inputs, reply extraction, replacement, a repair
+  that succeeds, problems that remain, failures, no time left, installing atlas, a floor on
+  `max_tokens`, the budget split in the task, and the solver wiring.
+- 2 atlas tests: the pack levels with no coverage entries, and check (new Fix items, refs
+  outside the inputs).
+
+**Offline check:** `tools/writer_check.py` runs the writer on a logged sample against the
+local corpus. A dry run with the mock model on a real 200k atlas sample, at W3:
+- the inputs were 76k characters, about 27k input tokens;
+- `pack` took about 10–20 s on 42k rows.
+
+**Reader notes in metadata.** The crew's notes used to live only in the sandbox's notes
+file, so W2 couldn't be replayed offline and nobody could check afterwards what the
+writer had been offered. Now:
+- `crew_notes` holds every kept note, exactly as written to the notes file, including
+  its `shown` flag. It comes to a few hundred notes per run.
+- The `writer` metadata lists the note lines the writer was given (up to 30).
+- `writer_check.py` loads `crew_notes` into its notes file. Which notes atlas showed is
+  rebuilt from the `notes-shown` entries in `atlas_coverage`.
+- Logs from before this change have no notes.

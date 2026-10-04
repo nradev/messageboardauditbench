@@ -641,7 +641,8 @@ ledger is the agent-written version of idea 6. We had set that aside because age
 rarely use opt-in tools, and replaced it with harness-kept reader notes (R5-lite). The
 writer idea stands on its own: the harness already holds verified, report-relevant
 material, so a writer can be fed automatically at no cost in agent turns. Status:
-planned, not built; PR #2 itself is not merged.
+built (implementation log step 25; `-T writer=W1|W2|W3`), not yet run; PR #2 itself
+is not merged.
 
 **Why a fresh writer.** Our agents build reports through 100–200 small edits inside a
 very long context, and every 30-minute report hit the 3,000-word cap. Several findings

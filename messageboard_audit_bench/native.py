@@ -32,6 +32,8 @@ from inspect_ai.util import LimitExceededError, sandbox, time_limit
 from inspect_swe import claude_code, codex_cli
 
 from messageboard_audit_bench.audit import trajectory_metrics
+from messageboard_audit_bench.final_writer import LEVELS as WRITER_LEVELS
+from messageboard_audit_bench.final_writer import run_writer
 from messageboard_audit_bench.investigation_tools import atlas as atlas_tool
 from messageboard_audit_bench.investigation_tools import (
     auto_gapcheck,
@@ -57,6 +59,8 @@ from messageboard_audit_bench.report_length import (
 from messageboard_audit_bench.token_budget import OutputTokenBudget
 
 REPORT_PATH = "/work/report.md"
+# The writer gets at least this long even when the agent used all of its time.
+WRITER_MIN_SECONDS = 120
 RUNTIME_POLICY_STATE_PATH = "/work/.mbab-runtime-policy.json"
 # A refusal is retried through the same provider/model only. Keeping this
 # finite makes the treatment reproducible and prevents a refused prompt from
@@ -646,6 +650,9 @@ def inspect_native_agent(
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
     output_token_budget: int | None = None,
+    writer: str | None = None,
+    writer_tokens: int = 0,
+    writer_seconds: int = 0,
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -653,6 +660,11 @@ def inspect_native_agent(
     stopped one final turn after its output tokens reach it, the minimum-runtime
     policy counts tokens instead of seconds, and ``time_limit_seconds`` is only
     the wall-clock backstop.
+
+    ``writer`` (``W1``/``W2``/``W3``, ReAct only) rewrites the final report with a fresh
+    model call after the agent stops (``final_writer``), within ``writer_tokens`` more
+    output tokens (token budgets) or ``writer_seconds`` more seconds (time budgets) than
+    the agent's own budget; the draft is kept on any failure.
 
     ``seed_reports`` maps a sample's parent epoch (``metadata["parent_epoch"]``)
     to an earlier report placed at ``/work/report.md`` before the agent starts,
@@ -667,6 +679,8 @@ def inspect_native_agent(
         raise ValueError("gapcheck_at needs tools=atlas and a budget share between 0 and 1")
     if sweep_at_start and "crew" not in investigation_tools:
         raise ValueError("sweep_at_start needs tools=atlas,crew")
+    if writer is not None and (writer not in WRITER_LEVELS or agent != "react"):
+        raise ValueError(f"writer needs agent=react and one of {', '.join(WRITER_LEVELS)}")
     if policy_aware_continue_enabled and agent != "react":
         raise ValueError("policy_aware_continue is only wired into agent=react")
     if investigation_tools and agent != "react":
@@ -902,6 +916,37 @@ def inspect_native_agent(
                 terminal_refusal = _terminal_refusal(agent_state)
                 report, report_read_error = await _read_report()
 
+            if writer is not None and not terminal_refusal:
+                # The writer works after the investigation: stop background reading, and
+                # take the agent's coverage before the writer's own atlas calls.
+                if crew is not None and crew.background is not None and not crew.background.done():
+                    crew.background.cancel()
+                if "atlas" in investigation_tools:
+                    state.metadata["atlas_coverage"] = await read_atlas_coverage()
+                total_tokens = token_budget.budget + writer_tokens if token_budget is not None else None
+                result = await run_writer(
+                    writer,
+                    state.input_text,
+                    report,
+                    min_words=report_min_words,
+                    max_words=report_max_words,
+                    tokens_left=(lambda: max(0, total_tokens - token_budget.used))
+                    if token_budget is not None else None,
+                    deadline=max(started + time_limit_seconds + writer_seconds,
+                                 time.monotonic() + WRITER_MIN_SECONDS),
+                    install="atlas" not in investigation_tools,
+                )
+                state.metadata["writer"] = {**result.meta, "reserve_tokens": writer_tokens,
+                                            "reserve_seconds": writer_seconds}
+                if result.report is not None:
+                    written = await sandbox().exec(["sh", "-c", f"cat > {REPORT_PATH}"], input=result.report)
+                    if written.success:
+                        state.metadata["writer_draft_report"] = report
+                        report, report_read_error = await _read_report()
+                    else:
+                        state.metadata["writer"]["status"] = "error"
+                        state.metadata["writer"]["reason"] = f"could not write the report: {written.stderr[:300]}"
+
         except Exception as exc:
             state.metadata["agent_error"] = f"{type(exc).__name__}: {exc}"[:1000]
             raise
@@ -912,13 +957,16 @@ def inspect_native_agent(
                 if token_budget is not None
                 else time.monotonic() - started >= minimum_runtime_seconds
             )
-            if "atlas" in investigation_tools:
+            if "atlas" in investigation_tools and "atlas_coverage" not in state.metadata:
                 state.metadata["atlas_coverage"] = await read_atlas_coverage()
             if crew is not None:
                 if crew.background is not None and not crew.background.done():
                     crew.background.cancel()
                 state.metadata["crew"] = {**crew.stats.metadata(), "notes_kept": len(crew.notes),
                                           "notes_shown": sum(1 for n in crew.notes if n["shown"])}
+                # Every kept note, as written to the sandbox's notes file: for auditing what
+                # the agent and the writer were offered, and for replaying the writer offline.
+                state.metadata["crew_notes"] = list(crew.notes)
                 if sweep_at_start:
                     rec = crew.background_record
                     state.metadata["crew_sweep_at_start"] = {

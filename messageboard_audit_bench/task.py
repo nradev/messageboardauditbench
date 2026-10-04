@@ -75,6 +75,7 @@ from messageboard_audit_bench.benchmarks import (
     urlquery_manifest,
 )
 from messageboard_audit_bench.configs import CONFIG_NAME, load_config
+from messageboard_audit_bench.final_writer import LEVELS as WRITER_LEVELS
 from messageboard_audit_bench.grading.core import SINGLE_CALL_MODES, variant_for_data
 from messageboard_audit_bench.grading.finding_scorer import finding_scorer
 from messageboard_audit_bench.grading.scorer import sheet_scorer
@@ -337,6 +338,8 @@ def _audit_task(
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
     token_budget: int | None = None,
+    writer: str | None = None,
+    writer_reserve: float = 0.1,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -390,6 +393,24 @@ def _audit_task(
             "a token budget needs agent='react' and backend='inspect'; the CLI "
             "scaffolds only support a time budget"
         )
+    # The final writer's reserve comes out of the trial budget: the agent is given (and told)
+    # the rest, so arms with and without a writer spend the same total.
+    agent_tokens, agent_min, writer_tokens, writer_seconds = budget_tokens, budget_min, 0, 0
+    if writer is not None:
+        if writer not in WRITER_LEVELS:
+            raise ValueError(f"writer must be one of {', '.join(WRITER_LEVELS)}")
+        if agent != "react" or backend != "inspect":
+            raise ValueError("writer is only supported with agent=react and backend=inspect")
+        if not 0 < float(writer_reserve) < 0.5:
+            raise ValueError("writer_reserve must be a budget share between 0 and 0.5 (e.g. 0.1)")
+        if budget_tokens is not None:
+            writer_tokens = round(budget_tokens * float(writer_reserve))
+            agent_tokens = budget_tokens - writer_tokens
+        else:
+            agent_min = budget_min - max(1, round(budget_min * float(writer_reserve)))
+            if agent_min < 1:
+                raise ValueError("the time budget is too short for a writer reserve")
+            writer_seconds = (budget_min - agent_min) * 60
     # On a token budget the minimum-runtime policy counts tokens, not seconds.
     minimum_runtime_seconds = (
         0
@@ -434,6 +455,12 @@ def _audit_task(
         sample_metadata["gapcheck_at"] = float(gapcheck_at)
     if sweep_at_start:
         sample_metadata["sweep_at_start"] = True
+    if writer is not None:
+        sample_metadata["writer"] = writer
+        sample_metadata["writer_reserve"] = float(writer_reserve)
+        sample_metadata["agent_budget"] = (
+            {"tokens": agent_tokens} if budget_tokens is not None else {"minutes": agent_min}
+        )
     if investigation_tools:
         sample_metadata["investigation_tools"] = list(investigation_tools)
         sample_metadata["investigation_tools_prompt"] = prompt_addendum(investigation_tools)
@@ -442,17 +469,18 @@ def _audit_task(
         sample_metadata["subscription_model"] = subscription_model
     sample = Sample(
         input=_prompt_for(
-            config, budget_min, runtime_fraction, benchmark_id, allow_drafts, budget_tokens
+            config, agent_min, runtime_fraction, benchmark_id, allow_drafts, agent_tokens
         )
         + prompt_addendum(investigation_tools),
         id=f"{agent}:{backend}:{config}:{budget_label}"
-        + "".join(f"+{t}" for t in investigation_tools),
+        + "".join(f"+{t}" for t in investigation_tools)
+        + (f"+writer-{writer}" if writer is not None else ""),
         metadata=sample_metadata,
     )
     if backend == "inspect":
         selected_solver = inspect_native_agent(
             agent=agent,
-            time_limit_seconds=budget_min * 60,
+            time_limit_seconds=agent_min * 60,
             claude_disallowed_tools=cfg.get("claude_disallowed_tools", []),
             report_min_words=limits(cfg)[0],
             report_max_words=limits(cfg)[1],
@@ -462,7 +490,10 @@ def _audit_task(
             policy_aware_continue_enabled=policy_aware_continue,
             gapcheck_at=float(gapcheck_at) if gapcheck_at is not None else None,
             sweep_at_start=bool(sweep_at_start),
-            output_token_budget=budget_tokens,
+            output_token_budget=agent_tokens,
+            writer=writer,
+            writer_tokens=writer_tokens,
+            writer_seconds=writer_seconds,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -547,6 +578,8 @@ def _german_wiki_report(
     token_budget: int | None = None,
     judge_effort: str | None = None,
     judge_single_call: bool = False,
+    writer: str | None = None,
+    writer_reserve: float = 0.1,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -603,6 +636,13 @@ def _german_wiki_report(
         sweep_at_start: With ``tools=atlas,crew``: start a ``crew_sweep`` in the background
             when the agent starts, and hand its digest to the agent (framed as leads to
             confirm) on the first turn after it finishes. Default off.
+        writer: ``W1``, ``W2`` or ``W3`` (``agent=react``): after the agent stops, a fresh
+            model call rewrites report.md from the draft and material the harness holds: W1
+            the gap check, W2 also unused reader notes, W3 also record excerpts and a corpus
+            map (see ``final_writer``). The ``writer`` model role overrides the agent's model.
+            The draft is kept if the rewrite fails its checks. Default off.
+        writer_reserve: Share of the budget (tokens, or minutes on a time budget) kept for
+            the writer; the agent is given and told the rest. Default ``0.1``.
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -623,6 +663,8 @@ def _german_wiki_report(
         gapcheck_at=gapcheck_at,
         sweep_at_start=sweep_at_start,
         token_budget=token_budget,
+        writer=writer,
+        writer_reserve=writer_reserve,
     )
 
 

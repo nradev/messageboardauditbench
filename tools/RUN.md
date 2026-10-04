@@ -324,3 +324,37 @@ uv run inspect eval messageboard_audit_bench/german_wiki_report \
 Read the results with `usage_metrics.py` as in section 4. It also prints the
 crew calls, reader tokens, the share of quotes that verified, and rows read by
 readers.
+
+## 9. Final writer (`-T writer=W1|W2|W3`)
+
+**Offline check first (a few cents).** Run the writer on a finished sample's
+report and read the result: does it keep the draft's findings, are the
+citations right, does it pass its own checks?
+
+```sh
+uv run python tools/writer_check.py logs/atlas-tok200k-v0.3.0/<file>.eval --sample 0 \
+  --level W3 --data data/verbatim \
+  --model openrouter/z-ai/glm-5.3 --provider wafer --out /tmp/writer-final.md
+```
+
+**Paired arms, run at the same time.** Each writer level is compared with the
+same arm without a writer, with 3 runs each. The writer's reserve (10% by
+default) comes out of the same 200k total, so the agent gets 180k.
+
+```sh
+for w in none W1 W3; do
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T config=blind-tokens -T token_budget=200000 \
+  -T tools=atlas -T gapcheck_at=0.6 $([ $w != none ] && echo "-T writer=$w") \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --epochs 3 --max-samples 3 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/atlas-tok200k-writer-$w &
+done; wait
+```
+
+For crew arms, use W2 or W3 with `-T tools=atlas,crew -T sweep_at_start=true`.
+The outcome is in each sample's `writer` metadata. When the writer replaced the
+report, the draft is in `writer_draft_report`, so the draft and the final report
+can be graded side by side.

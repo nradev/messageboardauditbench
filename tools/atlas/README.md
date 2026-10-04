@@ -48,13 +48,15 @@ Structure, oddities and the report:
 | `anomalies` | look-alike identifiers (values that differ only by confusable characters, e.g. a Cyrillic letter in a name), mixed-script words, actor bursts, bursts of one repeated record; each list capped |
 | `gapcheck [REPORT] [--dismiss gID ...]` | check a draft report against the data. **Fix**: citations and quotes the data does not support as written (bad refs, quotes not in the cited record, ids that exist nowhere); held to near-zero false positives. **Consider**: optional, phrased as questions (themes, dated events, files never mentioned, thin passages, material already surfaced but unused); leaving out immaterial items is correct |
 
-Used by the reading crew (below), not listed in `--help`:
+Used by the reading crew and the final writer (below), not listed in `--help`:
 
 | command | what it does |
 |---|---|
 | `records SET [--limit N] [--chars N] [--where ...]` | a set of records as JSON for readers; SET is `tNN`, `cNN`, `wNN`, `grep:REGEX`, `pivot:VALUE`, `rows:TABLE`, `around:REF`, `refs:A,B` or `sweep` |
 | `mark REF ... [--label L]` | log rows as read by crew readers (`unseen` lists them last) |
 | `notes [REGEX] [--n N]` | the kept reader notes, those not shown before first, ranked (what `crew_notes` calls) |
+| `writer pack DRAFT [--level W1\|W2\|W3]` | the final writer's inputs as JSON: the draft's gap check; W2 adds unused reader notes; W3 adds excerpts of cited records and of records read but not cited, and a corpus map |
+| `writer check REPORT --draft DRAFT --inputs FILE` | Fix items the rewrite has that the draft did not, and refs it cites that are nowhere in the inputs (JSON) |
 
 Every response ends with `→ next:` and the commands worth running next. Options may come
 before or after the command. `--json` gives machine-readable cluster lists (and gapcheck
@@ -127,6 +129,8 @@ Related task options (all off by default, so default runs are the published cond
 | `-T policy_aware_continue=true` (time budgets only) | before the earliest acceptable finish, Inspect's "call submit()" nudge is replaced by one that asks to keep investigating; reaching the early-completion cap accepts the report and sets `minimum_runtime_violation` instead of failing the sample. With tools enabled, both early-finish messages also name the arm's tools for widening the search |
 | `-T gapcheck_at=0.6` | runs `atlas gapcheck` on the draft once, on the first turn after that share of the budget (time, or output tokens with `-T token_budget` / the `blind-tokens` config), and sends its output with the "corrections first; Consider items optional" framing; outcome in `gapcheck_auto` (`at_share`, `share_of`) |
 | `-T sweep_at_start=true` | (needs `crew`) starts a crew sweep when the agent starts and hands its digest over on the first turn after it finishes; timing in `crew_sweep_at_start` |
+| `-T writer=W1\|W2\|W3` | the final writer (below) rewrites report.md after the agent stops; works with any arm (atlas is installed for the writer alone if the agent had no tools) |
+| `-T writer_reserve=0.1` | the writer's share of the budget (tokens, or minutes on a time budget); the agent is given and told the rest |
 
 ```sh
 uv run inspect eval messageboard_audit_bench/german_wiki_report \
@@ -183,9 +187,43 @@ records in parallel, outside the agent's turns, and return short notes with cita
   the early-finish nudge of crew runs mentions it.
 - **Metadata**: `crew` holds per-call stats (set, seconds, readers finished, notes),
   reader calls, tokens, latency, timeouts, errors, quotes returned, verified,
-  re-attributed and dropped, and notes kept and shown.
+  re-attributed and dropped, and notes kept and shown; `crew_notes` holds every kept note
+  (as written to the notes file), so what was offered can be audited and the writer
+  replayed offline.
 - **Reader check** (small cost, outside an eval): `tools/crew_check.py --data DIR SET ...
   [--ask "question"] --model ... [--provider ...]` prints the outputs and verification
   rates; `sweep` works as a SET.
 
 Design, decisions and results: `tools/TOOL_IDEAS.md`, `tools/IMPLEMENTATION_LOG.md`.
+
+## Final writer
+
+`messageboard_audit_bench/final_writer.py`, enabled with `-T writer=W1|W2|W3`. After the
+agent stops, one fresh model call rewrites the report from the draft and material the
+harness already holds, in a clean context, so findings seen during the investigation
+are less likely to be left out or crowded out under the word cap. It does not
+investigate: it may cite only refs that appear in its inputs.
+
+- **Inputs** (`atlas writer pack`): the task prompt (its report requirements; the parts on
+  tools and budget are marked as not applying), the draft, and its gap check (W1); the
+  ranked reader notes the draft does not use (W2); excerpts of up to 40 cited records and
+  20 records the agent read at length but did not cite, and a short corpus map of
+  overview, timeline and anomalies, marked as context only (W3). The gap check ignores
+  the agent's dismissals; Consider items stay optional.
+- **Checks** (`atlas writer check`): Fix items the draft did not have, cited refs that
+  appear nowhere in the inputs, and the word limits. One repair call gets the problems;
+  if any remain, the draft stays.
+- **Never fails the sample**: an empty reply, a timeout, a provider error or anything else
+  keeps the draft. The outcome is in `writer` metadata (status, reason, calls, tokens,
+  seconds, counts of inputs, the reader notes it was given, Fix items before and after, word
+  counts), and the draft in
+  `writer_draft_report` when it was replaced. The draft also stays in the sandbox at
+  `/work/report.draft.md`.
+- **Budget**: `writer_reserve` (default 0.1) comes out of the trial budget, so arms with
+  and without a writer spend the same total. On a token budget the writer gets what is
+  left of the total, at least 4,000 tokens per call. On a time budget it gets the reserved
+  minutes, at least 2.
+- **Model**: the `writer` model role if given, else the agent's model.
+- **Offline check**: `tools/writer_check.py` runs the writer on a finished sample's
+  report against the local corpus, with the reader notes from the sample's `crew_notes`.
+

@@ -34,6 +34,7 @@ from .query import cmd_count, cmd_entities, cmd_join, cmd_pivot, cmd_rows
 from .records import DEFAULT_CHARS, DEFAULT_LIMIT, cmd_mark, cmd_records
 from .themes import related
 from .timeline import cmd_timeline
+from .writer import cmd_writer
 
 HELP = """atlas: a map of a log corpus. Compress first, expand on request.
 
@@ -627,7 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         print(HELP)
         return 0
     commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count",
-                "themes", "rows", "join", "timeline", "gapcheck", "records", "mark", "anomalies", "notes")
+                "themes", "rows", "join", "timeline", "gapcheck", "records", "mark", "anomalies", "notes", "writer")
     # Accept options before the command too (`atlas --data DIR overview`).
     first = next((i for i, a in enumerate(argv) if a in commands), None)
     if first:
@@ -713,6 +714,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("mark", parents=[common])
     p.add_argument("refs", nargs="*")
     p.add_argument("--label")
+    p = sub.add_parser("writer", parents=[common])
+    p.add_argument("action", choices=["pack", "check"])
+    p.add_argument("path")
+    p.add_argument("--level", default="W1")
+    p.add_argument("--draft")
+    p.add_argument("--inputs")
     try:
         args = ap.parse_args(argv)
     except SystemExit:
@@ -737,6 +744,7 @@ def main(argv: list[str] | None = None) -> int:
                "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen,
                "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count, "themes": cmd_themes,
                "rows": cmd_rows, "join": cmd_join, "timeline": cmd_timeline, "gapcheck": cmd_gapcheck,
-               "records": cmd_records, "mark": cmd_mark, "anomalies": cmd_anomalies, "notes": cmd_notes}[args.cmd]
+               "records": cmd_records, "mark": cmd_mark, "anomalies": cmd_anomalies, "notes": cmd_notes,
+               "writer": cmd_writer}[args.cmd]
     print(handler(idx, args))
     return 0
