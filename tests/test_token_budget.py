@@ -89,3 +89,41 @@ def test_provider_reported_cost_sums_openrouter_usage() -> None:
     events = [event({"cost": 0.25}), event({"cost": 0.125}), event({}), "not an event"]
     assert _provider_reported_cost(events) == 0.375
     assert _provider_reported_cost([event({})]) is None
+
+
+def test_gapcheck_runs_once_at_a_share_of_the_token_budget(usage) -> None:
+    """With a token budget, `gapcheck_at` is a share of the budget's tokens, not of time."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from messageboard_audit_bench.native import combined_continue
+
+    budget = OutputTokenBudget(1000)
+    calls = []
+
+    async def runner():
+        calls.append(budget.used)
+        return "Automatic check … 0 to fix, 2 to consider", {"fix": 0, "consider": 2}
+
+    record: dict = {}
+    hook = combined_continue(None, None, record, runner=runner, clock=lambda: 0,
+                             gapcheck_due=lambda: budget.used >= 0.6 * budget.budget,
+                             gapcheck_share=lambda: budget.used / budget.budget)
+    turn_state = SimpleNamespace(output=SimpleNamespace(message=SimpleNamespace(tool_calls=["x"])))
+    usage["tokens"] = 500
+    assert asyncio.run(hook(turn_state)) is True and calls == []  # 50% used: not yet
+    usage["tokens"] = 650
+    assert asyncio.run(hook(turn_state)).startswith("Automatic check")
+    assert record["done"] and record["at_share"] == 0.65
+    usage["tokens"] = 800
+    assert asyncio.run(hook(turn_state)) is True and calls == [650]  # only once
+
+
+def test_gapcheck_at_is_accepted_with_a_token_budget_and_policy_aware_is_not() -> None:
+    from messageboard_audit_bench import native
+
+    native.inspect_native_agent("react", 600, investigation_tools=("atlas",), gapcheck_at=0.6,
+                                output_token_budget=25000)
+    with pytest.raises(ValueError, match="policy_aware_continue"):
+        native.inspect_native_agent("react", 600, policy_aware_continue_enabled=True,
+                                    output_token_budget=25000)

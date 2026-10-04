@@ -240,11 +240,16 @@ def policy_aware_continue(earliest_finish_epoch: int, clock=time.time, hint: str
 
 
 def combined_continue(policy_epoch: int | None, gapcheck_epoch: int | None, record: dict,
-                      runner=None, clock=time.time, crew=None, hint: str = ""):
+                      runner=None, clock=time.time, crew=None, hint: str = "",
+                      gapcheck_due=None, gapcheck_share=None):
     """One ``react`` on_continue hook for the optional behaviours: the automatic gap check
     (once, on the first turn after ``gapcheck_epoch``, when a draft exists), the digest of a
     background sweep (once, on the first turn after it finishes), and the policy-aware
-    continue message. With none enabled it reproduces react's default."""
+    continue message. With none enabled it reproduces react's default.
+
+    On an output-token budget the gap check is due by tokens instead of time:
+    ``gapcheck_due()`` says whether its share of the budget is used, and ``gapcheck_share()``
+    gives the share used when it runs."""
     policy = policy_aware_continue(policy_epoch, clock=clock, hint=hint) if policy_epoch else None
 
     async def on_continue(state: AgentState) -> bool | str:
@@ -252,11 +257,15 @@ def combined_continue(policy_epoch: int | None, gapcheck_epoch: int | None, reco
             digest = take_background_digest(crew)
             if digest is not None:
                 return digest
-        if gapcheck_epoch is not None and not record.get("done") and clock() >= gapcheck_epoch:
+        due = gapcheck_due() if gapcheck_due is not None else (
+            gapcheck_epoch is not None and clock() >= gapcheck_epoch)
+        if due and not record.get("done"):
             message, meta = await (runner or auto_gapcheck)()
             record["attempts"] = record.get("attempts", 0) + 1
             if message is not None:
                 record.update(meta, done=True, at_epoch=int(clock()))
+                if gapcheck_share is not None:
+                    record["at_share"] = round(gapcheck_share(), 3)
                 return message
         if policy is not None:
             return await policy(state)
@@ -664,12 +673,12 @@ def inspect_native_agent(
         raise ValueError("investigation tools are only wired into agent=react so far")
     if not 0 <= min_runtime_fraction < 1:
         raise ValueError("min_runtime_fraction must be between 0 (inclusive) and 1")
-    if output_token_budget is not None and (gapcheck_at or policy_aware_continue_enabled):
-        # Both are defined in wall-clock time (a share of time_limit_seconds, the
-        # earliest-finish epoch); on a token budget that is only the backstop.
+    if output_token_budget is not None and policy_aware_continue_enabled:
+        # Defined by the earliest-finish epoch; on a token budget the token-based
+        # minimum-budget continuation plays that role, and time is only the backstop.
         raise ValueError(
-            "gapcheck_at and policy_aware_continue are time-based; they are not "
-            "supported with an output-token budget yet"
+            "policy_aware_continue is time-based; it is not supported with an "
+            "output-token budget (the minimum-budget policy covers early finishes there)"
         )
     minimum_runtime_seconds = (
         0
@@ -747,10 +756,16 @@ def inspect_native_agent(
             on_continue=(
                 combined_continue(
                     earliest_finish_epoch if policy_aware_continue_enabled else None,
-                    started_epoch + int(gapcheck_at * time_limit_seconds) if gapcheck_at else None,
+                    started_epoch + int(gapcheck_at * time_limit_seconds)
+                    if gapcheck_at and token_budget is None else None,
                     gapcheck_record,
                     crew=crew if sweep_at_start else None,
                     hint=hint,
+                    # On a token budget, the gap check is due at a share of the budget's tokens.
+                    gapcheck_due=(lambda: token_budget.used >= gapcheck_at * token_budget.budget)
+                    if gapcheck_at and token_budget is not None else None,
+                    gapcheck_share=(lambda: token_budget.used / token_budget.budget)
+                    if gapcheck_at and token_budget is not None else None,
                 )
                 if policy_aware_continue_enabled or gapcheck_at or sweep_at_start
                 else None
@@ -916,10 +931,11 @@ def inspect_native_agent(
             if gapcheck_at is not None:
                 state.metadata["gapcheck_auto"] = {
                     **gapcheck_record,
-                    "at_share": (
+                    "at_share": gapcheck_record.get("at_share", (
                         round((gapcheck_record["at_epoch"] - started_epoch) / time_limit_seconds, 3)
                         if "at_epoch" in gapcheck_record else None
-                    ),
+                    )),
+                    "share_of": "output tokens" if output_token_budget is not None else "time",
                 }
             if agent != "react":
                 ids = [

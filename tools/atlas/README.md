@@ -124,8 +124,8 @@ Related task options (all off by default, so default runs are the published cond
 | option | effect |
 |---|---|
 | `-T tools=atlas,crew` | also the reading crew (below) |
-| `-T policy_aware_continue=true` | before the earliest acceptable finish, Inspect's "call submit()" nudge is replaced by one that asks to keep investigating; reaching the early-completion cap accepts the report and sets `minimum_runtime_violation` instead of failing the sample. With tools enabled, both early-finish messages also name the arm's tools for widening the search |
-| `-T gapcheck_at=0.6` | runs `atlas gapcheck` on the draft once, on the first turn after that share of the budget, and sends its output with the "corrections first; Consider items optional" framing; outcome in `gapcheck_auto` |
+| `-T policy_aware_continue=true` (time budgets only) | before the earliest acceptable finish, Inspect's "call submit()" nudge is replaced by one that asks to keep investigating; reaching the early-completion cap accepts the report and sets `minimum_runtime_violation` instead of failing the sample. With tools enabled, both early-finish messages also name the arm's tools for widening the search |
+| `-T gapcheck_at=0.6` | runs `atlas gapcheck` on the draft once, on the first turn after that share of the budget (time, or output tokens with `-T token_budget` / the `blind-tokens` config), and sends its output with the "corrections first; Consider items optional" framing; outcome in `gapcheck_auto` (`at_share`, `share_of`) |
 | `-T sweep_at_start=true` | (needs `crew`) starts a crew sweep when the agent starts and hands its digest over on the first turn after it finishes; timing in `crew_sweep_at_start` |
 
 ```sh

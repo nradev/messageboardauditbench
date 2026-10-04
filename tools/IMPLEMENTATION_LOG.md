@@ -1611,3 +1611,48 @@ Per run: 0.563 / 0.442 / 0.60 / 0.489 and 0.647 / 0.484 / 0.60 / 0.519.
 - **Cost:** agent input 25–33M tokens over 147–197 turns, about atlas-30min's level and
   below crew-30min's.
 - With 2 epochs per arm the differences remain within run-to-run variation.
+
+## Step 23: after merging PR #1 (token budgets, faster grading); `gapcheck_at` on a token budget
+
+The user merged PR #1 (benchmark 10.0 → 12.2): an output-token budget for native ReAct
+(`-T token_budget=N`, config `blind-tokens`), the standard ReAct tool schema except for
+OpenRouter-routed OpenAI models (12.0, agent-visible), concurrent sheet grading (12.1),
+optional single-call grading (12.2), and Claude Opus 5.5 as the default judge. Before
+the merge:
+- a dry-run merge was clean;
+- the merged tree passed the suite (apart from the 2 `node` tests and scratch-copy git
+  artefacts);
+- a time-based full-stack mock passed on it.
+
+Time-based runs keep the same command. They differ only in the 12.0 tool schema (so
+post-merge runs are compared with post-merge reference arms) and in concurrent grading.
+
+**Notes from the review:**
+- **The token budget counts every model in the sample**
+  (`sample_model_usage()`), so crew readers count. The user wants exactly that and will
+  raise budgets if needed. The PR description ("only the agent's own model") is
+  inaccurate.
+- **Sequential sheet grading never used the prompt cache.** All 54 grader calls in the
+  three 30-minute run sets show 0 cache-read and about 30k cache-write tokens. The cached
+  prefix (a sheet plus the answer key) is shared across reports, not across one report's
+  sheets, and our reports were graded concurrently. So concurrent grading loses nothing
+  we had.
+
+**Change: `gapcheck_at` works on a token budget.**
+- On a token budget, the automatic gap check is due when that share of the
+  budget's output tokens is used: `combined_continue(..., gapcheck_due, gapcheck_share)`.
+- It records `at_share` as the token share and `share_of: "output tokens"` (`"time"` on
+  time budgets).
+- Time-based runs are unchanged.
+- `policy_aware_continue` is still rejected with a token budget, because the PR's
+  token-based minimum-budget continuation covers early finishes there (it carries the
+  tool hint too).
+
+**Verified:**
+- 2 new tests in `tests/test_token_budget.py`: due at a token share and only once;
+  `gapcheck_at` accepted with a token budget, `policy_aware_continue` not.
+- A sandbox mock (400 output tokens per turn, budget 2,000, `gapcheck_at=0.5`): the
+  check fired once at a share of 0.6, the first turn after half; the budget's final
+  turn and stop still worked.
+- Full suite apart from the 2 pre-existing `node` failures; ruff clean.
+- `tools/atlas/README.md` updated.
