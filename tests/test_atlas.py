@@ -400,6 +400,30 @@ def test_gapcheck_at_option_validation_and_prompt():
         _german_wiki_report(agent="react", tools="atlas", gapcheck_at=1.5)
 
 
+def test_ledger_writer_option_keeps_control_prompt_unchanged():
+    from messageboard_audit_bench.task import _german_wiki_report
+
+    control = _german_wiki_report(agent="react", tools="atlas", time_limit_minutes=10).dataset[0]
+    treatment = _german_wiki_report(
+        agent="react", tools="atlas", ledger_writer=True, time_limit_minutes=10
+    ).dataset[0]
+    assert treatment.input.startswith(control.input)
+    assert "evidence_ledger.md" in treatment.input
+    assert treatment.metadata["ledger_writer_enabled"] is True
+    with pytest.raises(ValueError, match="ledger_writer needs"):
+        _german_wiki_report(agent="react", ledger_writer=True)
+
+
+def test_ledger_writer_uses_only_draft_and_ledger():
+    from messageboard_audit_bench.ledger_writer import WriterInput, writer_messages
+
+    messages = writer_messages(WriterInput("Draft text", "Claim supported by log:12", 2500, 3000))
+    text = "\n".join(str(message.content) for message in messages)
+    assert "Draft text" in text and "log:12" in text
+    assert "2500 to 3000" in text
+    assert "human report" not in text.lower()
+
+
 def test_anomalies_find_lookalikes_mixed_scripts_and_bursts(tmp_path, monkeypatch, capsys):
     lookalike = "admin_k\u0430rl"  # Cyrillic а (U+0430) in place of the Latin a
     rows = [{"id": f"a{i}", "time": f"2026-01-{1 + i % 20:02d}T10:00:00Z", "user": "admin_karl",

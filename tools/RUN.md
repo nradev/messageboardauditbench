@@ -1,17 +1,89 @@
 # Running the investigation-tool experiments
 
-Commands for building the data, trying `atlas` locally, and running the paired
-pilots (with and without `atlas`) on the German wiki report. Run everything from
-the repository root. Design: `TOOL_IDEAS.md`; history and findings:
-`IMPLEMENTATION_LOG.md`.
+Commands for the ledger-writer pilot and other Atlas experiments on the German
+wiki report. Run everything from the repository root. Design: `TOOL_IDEAS.md`;
+history and findings: `IMPLEMENTATION_LOG.md`.
+
+## Ledger writer pilot (optional arm)
+
+**Question:** Does a compact evidence ledger plus a fresh final writer improve
+report quality enough to justify its tokens? The control is current Atlas. The
+treatment adds only `-T ledger_writer=true` to the same model, judge and
+10-minute budget.
+
+The investigator writes `/work/evidence_ledger.md` alongside its usual draft,
+with claims, record IDs, short excerpts, confidence and whether each claim made
+the draft. The harness reserves the last 24% of the budget for one fresh call
+to the policy model. It receives only the draft and ledger, saves
+`/work/report_ledger_final.md`, and submits that report to the scorer. The
+answer key and rubric are never supplied. The original draft remains available
+in the eval metadata. A missing ledger or failed writer fails the sample.
+
+**Observed one-sample pilot (DeepSeek V4.1 Flash as agent and judge):**
+
+| Metric | Atlas control | Ledger writer |
+| --- | ---: | ---: |
+| Combined score | 0.360 | 0.427 |
+| Findings above 0.5 | 15/38 | 16/38 |
+| Agent + writer tokens | 3.06M | 3.70M |
+| Agent wall time | 7m 52s | 8m 23s |
+
+The quality signal is positive; token use rose 21%, so score per million tokens
+fell slightly. The two investigators were independent stochastic runs, and one
+sample per arm cannot isolate the writer's contribution. Atlas flagged one
+invalid `events:0` citation in the treatment report. Compare more paired runs
+before adopting it as the default.
+
+**Rerun the pair:** from the repo root, run `uv sync --dev --all-extras`, put
+`OPENROUTER_API_KEY` in a gitignored `.env`, and build `data/verbatim` with
+`scripts/build_data.sh` if absent. Use new descriptive log directory names for
+each rerun; Inspect does not overwrite existing LLM artifacts. Both commands
+use the same pinned provider and one-sample scoring setup as the pilot.
+
+```sh
+uv run --env-file .env inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T tools=atlas -T time_limit_minutes=10 \
+  -T policy_aware_continue=true \
+  --model openrouter/deepseek/deepseek-v4.1-flash \
+  --model-role grader=openrouter/deepseek/deepseek-v4.1-flash \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 2400 --epochs 1 --max-samples 1 \
+  --log-dir logs/atlas-control-deepseek-v41-flash-YOUR-RUN-ID
+```
+
+```sh
+uv run --env-file .env inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T tools=atlas -T time_limit_minutes=10 \
+  -T policy_aware_continue=true -T ledger_writer=true \
+  --model openrouter/deepseek/deepseek-v4.1-flash \
+  --model-role grader=openrouter/deepseek/deepseek-v4.1-flash \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --time-limit 2400 --epochs 1 --max-samples 1 \
+  --log-dir logs/atlas-ledger-writer-deepseek-v41-flash-YOUR-RUN-ID
+```
+
+Run the commands one at a time to limit local Docker load. Read both results
+with one command (replace the two run IDs):
+
+```sh
+uv run python tools/atlas/usage_metrics.py \
+  logs/atlas-control-deepseek-v41-flash-YOUR-RUN-ID/*.eval \
+  logs/atlas-ledger-writer-deepseek-v41-flash-YOUR-RUN-ID/*.eval
+```
+
+Compare combined score, findings above 0.5, agent-plus-writer tokens, wall time,
+and `ledger_writer.gapcheck.fix`. Inspect gains and losses in each eval's
+per-finding grade. The writer uses medium reasoning effort; the investigator
+keeps the task's configured effort. Scores from different judges are not
+directly comparable.
 
 ## 1. Setup
 
-`.env` in the repository root (gitignored; Inspect reads it):
+`.env` in the repository root (gitignored; load it with `uv run --env-file .env`):
 
 ```sh
-OPENROUTER_API_KEY=...   # agent models (openrouter/...)
-OPENAI_API_KEY=...       # judge (openai/gpt-6.1-sol)
+OPENROUTER_API_KEY=...   # the DeepSeek pilot uses this for agent and judge
+# OPENAI_API_KEY=...     # only for older examples below using openai/... directly
 ```
 
 Build the data. If `collusion.wiki` is unreachable, use the Wayback copy; the

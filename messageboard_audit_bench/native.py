@@ -9,6 +9,7 @@ the agent stops, including when the scoped Inspect time limit fires.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -23,6 +24,7 @@ from inspect_ai.model import (
     ChatMessageUser,
     ModelOutput,
     ModelUsage,
+    get_model,
 )
 from inspect_ai.model._model import sample_model_usage
 from inspect_ai.solver import Generate, Solver, TaskState, solver
@@ -35,8 +37,14 @@ from messageboard_audit_bench.investigation_tools import atlas as atlas_tool
 from messageboard_audit_bench.investigation_tools import (
     auto_gapcheck,
     continue_hint,
+    gapcheck_report,
     install_atlas,
     read_atlas_coverage,
+)
+from messageboard_audit_bench.ledger_writer import (
+    LEDGER_PATH,
+    WriterInput,
+    write_final_report,
 )
 from messageboard_audit_bench.native_telemetry import event_coverage, hook_coverage
 from messageboard_audit_bench.provenance import host_provenance
@@ -55,6 +63,7 @@ from messageboard_audit_bench.report_length import (
 )
 
 REPORT_PATH = "/work/report.md"
+LEDGER_FINAL_PATH = "/work/report_ledger_final.md"
 RUNTIME_POLICY_STATE_PATH = "/work/.mbab-runtime-policy.json"
 # A refusal is retried through the same provider/model only. Keeping this
 # finite makes the treatment reproducible and prevents a refused prompt from
@@ -536,6 +545,7 @@ def inspect_native_agent(
     policy_aware_continue_enabled: bool = False,
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
+    ledger_writer: bool = False,
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -552,6 +562,8 @@ def inspect_native_agent(
         raise ValueError("gapcheck_at needs tools=atlas and a budget share between 0 and 1")
     if sweep_at_start and "crew" not in investigation_tools:
         raise ValueError("sweep_at_start needs tools=atlas,crew")
+    if ledger_writer and (agent != "react" or "atlas" not in investigation_tools):
+        raise ValueError("ledger_writer needs agent=react and tools=atlas")
     if policy_aware_continue_enabled and agent != "react":
         raise ValueError("policy_aware_continue is only wired into agent=react")
     if investigation_tools and agent != "react":
@@ -559,6 +571,10 @@ def inspect_native_agent(
     if not 0 <= min_runtime_fraction < 1:
         raise ValueError("min_runtime_fraction must be between 0 (inclusive) and 1")
     minimum_runtime_seconds = math.ceil(time_limit_seconds * min_runtime_fraction)
+    writer_seconds = max(90, math.ceil(time_limit_seconds * 0.24)) if ledger_writer else 0
+    investigation_seconds = time_limit_seconds - writer_seconds
+    if investigation_seconds <= minimum_runtime_seconds:
+        raise ValueError("ledger_writer leaves no investigation time after the minimum-runtime requirement")
     hint = continue_hint(tuple(investigation_tools))
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
@@ -577,7 +593,7 @@ def inspect_native_agent(
             ]
         started = time.monotonic()
         started_epoch = int(time.time())
-        deadline_epoch = started_epoch + time_limit_seconds
+        deadline_epoch = started_epoch + investigation_seconds
         earliest_finish_epoch = started_epoch + minimum_runtime_seconds
         budget_minutes = max(1, round(time_limit_seconds / 60))
         state.metadata["sandbox_preflight"] = await _prepare_budget(
@@ -657,7 +673,7 @@ def inspect_native_agent(
             result = await run(
                 selected,
                 state.messages,
-                limits=[time_limit(time_limit_seconds)],
+                limits=[time_limit(investigation_seconds)],
             )
             agent_state, limit_error = result
             terminal_refusal = _terminal_refusal(agent_state)
@@ -685,7 +701,7 @@ def inspect_native_agent(
                         f"{minimum_runtime_seconds}-second investigation period"
                     )
                 elapsed = time.monotonic() - started
-                remaining = max(0, math.ceil(time_limit_seconds - elapsed))
+                remaining = max(0, math.ceil(investigation_seconds - elapsed))
                 if remaining == 0:
                     break
                 early_stop_resume_attempts += 1
@@ -716,7 +732,7 @@ def inspect_native_agent(
             # early or write a short report. A single continuation is reserved for
             # correcting a report above the prompt's strict upper limit.
             revision = _overlong_revision(report, report_max_words)
-            remaining = max(0, math.ceil(time_limit_seconds - elapsed))
+            remaining = max(0, math.ceil(investigation_seconds - elapsed))
             if (
                 revision
                 and remaining >= MIN_REVISION_SECONDS
@@ -743,6 +759,49 @@ def inspect_native_agent(
             raise
         finally:
             report, report_read_error = await _read_report()
+            if ledger_writer and not state.metadata.get("agent_error"):
+                if not report.strip():
+                    raise ValueError("ledger writer needs a draft in /work/report.md")
+                try:
+                    ledger = await sandbox().read_file(LEDGER_PATH)
+                except Exception as exc:
+                    raise FileNotFoundError(
+                        f"ledger writer needs {LEDGER_PATH}: {exc}"
+                    ) from exc
+                if not ledger.strip():
+                    raise ValueError(f"ledger writer needs findings in {LEDGER_PATH}")
+                draft_words = count_words(report)
+                state.metadata["ledger_writer"] = {
+                    "ledger": ledger,
+                    "draft_report": report,
+                    "ledger_chars": len(ledger),
+                    "draft_words": draft_words,
+                }
+                writer_started = time.monotonic()
+                writer_remaining = max(1, math.ceil(time_limit_seconds - (writer_started - started) - 15))
+                writer_result = await asyncio.wait_for(
+                    write_final_report(WriterInput(report, ledger, report_min_words, report_max_words), get_model()),
+                    timeout=writer_remaining,
+                )
+                report = writer_result.report
+                if report_max_words and count_words(report) > report_max_words:
+                    raise ValueError(
+                        f"ledger writer produced {count_words(report)} words, above {report_max_words}"
+                    )
+                saved = await sandbox().exec(["sh", "-c", f"cat > {LEDGER_FINAL_PATH}"], input=report)
+                if not saved.success:
+                    raise RuntimeError(f"could not save ledger writer report: {saved.stderr}")
+                state.metadata["ledger_writer"].update({
+                    "final_path": LEDGER_FINAL_PATH,
+                    "final_words": count_words(report),
+                    "seconds": round(time.monotonic() - writer_started, 1),
+                    "model": writer_result.model,
+                    "input_tokens": writer_result.input_tokens,
+                    "output_tokens": writer_result.output_tokens,
+                })
+                check_seconds = max(1, math.ceil(time_limit_seconds - (time.monotonic() - started)))
+                _, check = await asyncio.wait_for(gapcheck_report(LEDGER_FINAL_PATH), timeout=check_seconds)
+                state.metadata["ledger_writer"]["gapcheck"] = check
             minimum_runtime_reached = (
                 time.monotonic() - started >= minimum_runtime_seconds
             )

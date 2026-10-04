@@ -51,17 +51,21 @@ def _headline(scores) -> str:
     """The published metric: finding coverage = mean of max(2s - 1, 0) over findings,
     combined = 0.7 x coverage + 0.3 x TL;DR (see README "How grading works")."""
     cov = tldr = raw = None
+    above_half = finding_count = None
     for sc in scores.values():
         grade = (sc.metadata or {}).get("grade") or {}
         items = grade.get("scores") or {}
         if grade.get("rubric") == "v2" and items:
             cov = sum(max(2 * v["score"] - 1, 0) for v in items.values()) / len(items)
             raw = sum(v["score"] for v in items.values()) / len(items)
+            above_half = sum(v["score"] > 0.5 for v in items.values())
+            finding_count = len(items)
         elif grade.get("rubric") == "tldrh" and items:
             tldr = sum(v["score"] for v in items.values()) / len(items)
     if cov is None or tldr is None:
         return ""
-    return (f"raw findings {raw:.3f}, coverage {cov:.3f}, tldr {tldr:.2f}, "
+    return (f"raw findings {raw:.3f}, above 0.5 {above_half}/{finding_count}, "
+            f"coverage {cov:.3f}, tldr {tldr:.2f}, "
             f"combined {0.7 * cov + 0.3 * tldr:.3f}")
 
 
@@ -128,6 +132,29 @@ def summarize(path: Path, data: Path | None) -> list[str]:
         words = s.metadata.get("report_words")
         if words is not None:
             out.append(f"    report words {words}")
+        if s.metadata.get("input_tokens") is not None:
+            total_tokens = s.metadata.get("total_tokens")
+            if total_tokens is None:
+                total_tokens = s.metadata["input_tokens"] + (s.metadata.get("output_tokens") or 0)
+            out.append(
+                f"    model tokens {total_tokens:,} total: "
+                f"{s.metadata['input_tokens']:,} input "
+                f"({s.metadata.get('input_tokens_uncached') or 0:,} uncached, "
+                f"{s.metadata.get('cache_read_tokens') or 0:,} cache read), "
+                f"{s.metadata.get('output_tokens') or 0:,} output"
+            )
+        if s.metadata.get("wall_seconds") is not None:
+            out.append(f"    agent wall time {s.metadata['wall_seconds']:.1f}s")
+        writer = s.metadata.get("ledger_writer")
+        if writer:
+            check = writer.get("gapcheck") or {}
+            out.append(
+                f"    ledger writer {writer.get('draft_words')} draft words -> "
+                f"{writer.get('final_words')} final words, "
+                f"{writer.get('input_tokens', 0):,} input / "
+                f"{writer.get('output_tokens', 0):,} output tokens, "
+                f"{writer.get('seconds')}s, gapcheck Fix {check.get('fix')}"
+            )
         if s.scores:
             out.append("    scores: " + ", ".join(f"{k}={v.value}" for k, v in s.scores.items()))
             headline = _headline(s.scores)
