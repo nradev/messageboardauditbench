@@ -7,12 +7,12 @@ A SET is one of:
   rows:TABLE             rows of one file, filtered with --where (same syntax as `atlas rows`)
   around:REF             rows next to REF in the same file, in time order (--n per side)
   refs:REF,REF,...       exactly these rows (file:line or record ids)
-  sweep                  the corpus's most informative records the agent has not read,
-                         opened or been shown in a listing: mostly salient rare records
-                         (diverse), a few theme examples and repeated records, and (for
-                         low-redundancy files) the most salient windows; each record says
-                         why it was picked. Calling it again moves on, since records read
-                         by readers are left out.
+  sweep                  informative records nobody has read yet (not opened or shown in
+                         full by the agent, not read by readers): salient windows for
+                         low-redundancy files, then theme examples and salient clusters of
+                         every size band (rare ≤5, mid-size 6–50, largest), the rest spread
+                         over time; each record says why it was picked. Calling it again
+                         moves on.
 
 Near-duplicates are read once: rows of the same cluster collapse to one representative
 with a count. When a set is larger than --limit, up to a third of the picks are the most
@@ -299,22 +299,30 @@ def select(idx: Index, rows: list[tuple[str, int]], mode: str, limit: int) -> li
 
 SWEEP_THEMES = 12  # themes sampled per sweep
 SWEEP_PER_THEME = 2
+# Cluster-size bands: atlas's "small cluster" boundary (5, as in `unseen`) and an order of
+# magnitude above it. Informative records occur at every rarity: one-offs, things a handful
+# of actors repeated, records edited or reposted many times, and the bulk.
+RARE_MAX, MID_MAX = 5, 50
+# Shares of the sweep (after windows): theme examples, rare, mid-size, large; the rest is
+# spread over time.
+SHARES = {"theme": 1 / 8, "rare": 0.45, "mid": 0.30, "large": 0.05}
 
 
 def sweep_rows(idx: Index, limit: int) -> list[tuple[str, int, str]]:
-    """(table, row, why) for a sweep of up to ``limit`` records the agent has not read,
-    opened or been shown in a listing, skipping atlas's most salient rare records (its own
-    listings show those): windows for low-redundancy files (up to half), a few
-    theme examples (an eighth), mostly salient rare records (diversified; at least half),
-    a twentieth the most repeated records, the rest spread over time. Grouped by source,
-    so a reader's batch is coherent."""
+    """(table, row, why) for a sweep of up to ``limit`` records nobody has read yet: not
+    opened or shown in full by the agent, not read by readers. A one-line listing is not
+    reading, so listed records stay candidates (agents often act on listings without opening
+    them). Windows come first for low-redundancy files (up to half); the rest is shared
+    between a few theme examples, salient rare clusters (≤5 rows), salient mid-size clusters
+    (6–50 rows; for these, the latest unread version, which carries the accumulated content),
+    the largest clusters, and records spread over time. Within each band clusters are taken
+    by salience, diversified so they are not variants of one topic. Grouped by source, so a
+    reader's batch is coherent."""
     from .cli import is_trivial  # cli imports this module
+    from .fmt import diversify
 
-    opened, seen_rows, listed = coverage.load()
+    opened, seen_rows, _listed = coverage.load()
     done = coverage.load_read() | seen_rows
-    # Units the agent has seen (opened, or as a listing line), plus atlas's most salient rare
-    # records, which `overview` and `unseen` exist to show: the crew complements atlas.
-    shown = opened | listed | set(idx.top_salient)
     picked: list[tuple[str, int, str]] = []
     have: set[tuple[str, int]] = set()
 
@@ -328,6 +336,9 @@ def sweep_rows(idx: Index, limit: int) -> list[tuple[str, int, str]]:
     def first_new(c) -> int | None:
         return next((r for r in c.members if ref(c.table, r) not in done), None)
 
+    def latest_new(c) -> int | None:
+        return next((r for r in reversed(c.members) if ref(c.table, r) not in done), None)
+
     # Windows first for low-redundancy files (one long narrative reads best in context).
     if idx.windows:
         quota = limit // 2
@@ -336,37 +347,35 @@ def sweep_rows(idx: Index, limit: int) -> list[tuple[str, int, str]]:
                 break
             for r in w.members:
                 add(w.table, r, f"window {w.cid}")
-    # Theme examples (a few, from clusters not shown yet): the most typical cluster, the
-    # largest and the most salient one. Atlas's overview already shows what themes are about.
-    theme_quota = len(picked) + limit // 8
+    budget = limit - len(picked)
+    # Theme examples: the most typical cluster, the largest and the most salient one.
+    theme_quota = len(picked) + int(budget * SHARES["theme"])
     for th in sorted(idx.themes, key=lambda t: (-t.actors, -t.rows))[:SWEEP_THEMES]:
         members = [idx.by_id[c] for c in th.clusters]
         cands = [idx.by_id[th.example]] if th.example in idx.by_id else []
         cands += sorted(members, key=lambda c: -c.size)[:2] + sorted(members, key=lambda c: -c.score)[:2]
-        cands = [c for c in cands if c.cid not in shown]
         n = 0
         for c in cands:
+            if c.cid in opened:
+                continue
             r = first_new(c)
             if r is not None and n < SWEEP_PER_THEME and len(picked) < theme_quota and add(c.table, r, f"theme {th.tid}"):
                 n += 1
-    # The most salient rare records, diversified so they are not variants of one topic.
-    from .fmt import diversify
-
-    # Rare records the agent has not been shown in any listing: the sweep goes past what
-    # atlas already put in front of it, into the long tail.
-    rare_quota = len(picked) + max(limit // 2, (limit - len(picked)) * 4 // 5)
-    small = [c for c in idx.clusters if c.size <= 5 and c.cid not in shown and not is_trivial(idx, c)]
-    for c in diversify(idx, sorted(small, key=lambda c: -c.score)):
-        if len(picked) >= rare_quota:
-            break
-        r = first_new(c)
-        if r is not None:
-            add(c.table, r, f"rare {c.cid}")
-    # The most repeated records (what most of the corpus says).
-    rep_quota = len(picked) + max(1, limit // 20)
-    for c in sorted((c for c in idx.clusters if c.size > 5 and c.cid not in shown and not is_trivial(idx, c)),
-                    key=lambda c: -c.size):
-        if len(picked) >= rep_quota:
+    usable = [c for c in idx.clusters if c.cid not in opened and not is_trivial(idx, c)]
+    bands = [("rare", [c for c in usable if c.size <= RARE_MAX], first_new),
+             ("mid", [c for c in usable if RARE_MAX < c.size <= MID_MAX], latest_new)]
+    for name, pool, pick in bands:
+        quota = len(picked) + int(budget * SHARES[name])
+        for c in diversify(idx, sorted(pool, key=lambda c: -c.score)):
+            if len(picked) >= quota:
+                break
+            r = pick(c)
+            if r is not None:
+                add(c.table, r, f"{name} {c.cid}" + (f" ×{c.size}" if c.size > 1 else ""))
+    # The largest clusters (what most of the corpus says).
+    quota = len(picked) + max(1, int(budget * SHARES["large"]))
+    for c in sorted((c for c in usable if c.size > MID_MAX), key=lambda c: -c.size):
+        if len(picked) >= quota:
             break
         r = first_new(c)
         if r is not None:

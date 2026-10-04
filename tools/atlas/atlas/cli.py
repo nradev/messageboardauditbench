@@ -29,6 +29,7 @@ from .fmt import (
 )
 from .gapcheck import cmd_gapcheck
 from .index import Index, build_index
+from .notes import cmd_notes, unseen_section
 from .query import cmd_count, cmd_entities, cmd_join, cmd_pivot, cmd_rows
 from .records import DEFAULT_CHARS, DEFAULT_LIMIT, cmd_mark, cmd_records
 from .themes import related
@@ -599,6 +600,7 @@ def cmd_unseen(idx: Index, args) -> str:
         out.append(f"\nUnopened windows ({len(wins)}), in order: " + " ".join(w.cid for w in wins[:30]) +
                    (" …" if len(wins) > 30 else ""))
     out.append("Records listed here count as shown: the next `atlas unseen` starts with new ones.")
+    out += unseen_section(idx)
     out.append(footer(f"atlas expand {shown[0].cid}" if shown else "", "atlas unseen"))
     coverage.record("unseen", [f"page={args.page}"], listed=[c.cid for c in shown] + also_listed)
     return "\n".join(out)
@@ -625,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
         print(HELP)
         return 0
     commands = ("overview", "profile", "clusters", "expand", "show", "grep", "unseen", "entities", "pivot", "count",
-                "themes", "rows", "join", "timeline", "gapcheck", "records", "mark", "anomalies")
+                "themes", "rows", "join", "timeline", "gapcheck", "records", "mark", "anomalies", "notes")
     # Accept options before the command too (`atlas --data DIR overview`).
     first = next((i for i, a in enumerate(argv) if a in commands), None)
     if first:
@@ -705,6 +707,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     p.add_argument("--chars", type=int, default=DEFAULT_CHARS)
     p.add_argument("--n", type=int, default=10)
+    p = sub.add_parser("notes", parents=[common])
+    p.add_argument("pattern", nargs="?")
+    p.add_argument("--n", type=int, default=30)
     p = sub.add_parser("mark", parents=[common])
     p.add_argument("refs", nargs="*")
     p.add_argument("--label")
@@ -732,6 +737,6 @@ def main(argv: list[str] | None = None) -> int:
                "expand": cmd_expand, "show": cmd_show, "grep": cmd_grep, "unseen": cmd_unseen,
                "entities": cmd_entities, "pivot": cmd_pivot, "count": cmd_count, "themes": cmd_themes,
                "rows": cmd_rows, "join": cmd_join, "timeline": cmd_timeline, "gapcheck": cmd_gapcheck,
-               "records": cmd_records, "mark": cmd_mark, "anomalies": cmd_anomalies}[args.cmd]
+               "records": cmd_records, "mark": cmd_mark, "anomalies": cmd_anomalies, "notes": cmd_notes}[args.cmd]
     print(handler(idx, args))
     return 0

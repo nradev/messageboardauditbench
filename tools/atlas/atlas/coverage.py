@@ -77,6 +77,23 @@ def load_read() -> set[str]:
     return out
 
 
+def load_entries() -> list[dict]:
+    """Every entry of the coverage log, in order."""
+    out = []
+    try:
+        with state_path().open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(e, dict):
+                    out.append(e)
+    except OSError:
+        pass
+    return out
+
+
 def load_dismissed() -> set[str]:
     """Gap-checker item ids the agent set aside with `atlas gapcheck --dismiss`."""
     out: set[str] = set()

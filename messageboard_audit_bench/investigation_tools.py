@@ -60,10 +60,8 @@ TOOL_PROMPTS = {
         "depth instead of sampling a few records; `crew ask SET` with a question to check every "
         "record in a set (grep hits, filtered rows, a theme) for the answer, including whether "
         "something never happens. Sets are atlas ids (tNN, cNN, wNN), grep:REGEX, pivot:VALUE, "
-        "rows:TABLE with filters, around:REF or refs:A,B. Each call shows only some of the notes "
-        "its readers produce; `crew notes` (optionally with a regex) lists the rest. Readers see "
-        "only the records given to them and can miss things, so confirm what you rely on with "
-        "`atlas show`.\n"
+        "rows:TABLE with filters, around:REF or refs:A,B. Readers see only the records given to "
+        "them and can miss things, so confirm what you rely on with `atlas show`.\n"
     ),
 }
 
@@ -72,8 +70,9 @@ TOOL_PROMPTS = {
 # published wording.
 CONTINUE_HINTS = {
     "atlas": "`atlas unseen` lists salient records you have not looked at",
-    "crew": "`crew sweep` has readers go through records you have not read yet, and "
-            "`crew ask SET` checks a whole set against a question",
+    "crew": "`crew sweep` has readers go through records you have not read yet, "
+            "`crew ask SET` checks a whole set against a question, and `crew notes` lists what "
+            "readers noted that you have not seen yet",
 }
 
 

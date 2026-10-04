@@ -125,6 +125,9 @@ def summarize(path: Path, data: Path | None) -> list[str]:
             if s.metadata.get("atlas_coverage"):
                 read = {r for c in s.metadata["atlas_coverage"] for r in c.get("read", [])}
                 out.append(f"    rows read by readers {len(read)}")
+                pushed = [c for c in s.metadata["atlas_coverage"] if c.get("cmd") == "notes-shown"]
+                out.append(f"    reader notes shown by atlas {sum(len(c.get('args', [])) for c in pushed)} "
+                           f"(in unseen and atlas/crew notes)")
         words = s.metadata.get("report_words")
         if words is not None:
             out.append(f"    report words {words}")

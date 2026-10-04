@@ -1419,3 +1419,195 @@ years: week.
   about 20 days).
 - 54 atlas and crew tests; full suite apart from the 2 pre-existing `node`
   failures; ruff clean.
+
+## 30-minute crew run v2 (steps 18–21) vs earlier arms
+
+`logs/crew-30min-v2-superseded` (renamed from `crew-30min-v2` after step 22): same command as `crew-30min` (`atlas,crew`,
+`gapcheck_at=0.6`, `sweep_at_start`, `policy_aware_continue`), 2 epochs, run
+on a different day. New since `crew-30min`: excerpts, the deeper sweep,
+`anomalies` (also in the atlas prompt), `crew notes` (also in the crew
+prompt), the gap checker's unused-material items, and the adaptive time unit
+(no effect on the wiki).
+
+| arm | raw findings | coverage | TL;DR | combined | full / partial / zero |
+|---|---|---|---|---|---|
+| baseline-30min | 0.426 | 0.272 | 0.55 | 0.355 | 18 / 33 / 25 |
+| atlas-30min | 0.554 | 0.406 | 0.60 | 0.464 | 28 / 32 / 16 |
+| crew-30min | 0.566 | 0.432 | 0.60 | 0.482 | 31 / 27 / 18 |
+| crew-30min-v2 | 0.506 | 0.382 | 0.65 | 0.462 | 28 / 25 / 23 |
+
+Per run, v2: 0.537 / 0.432 / 0.60 / 0.482 and 0.474 / 0.332 / 0.70 / 0.442.
+
+**What went right:**
+- **Impersonation via a look-alike name (N26, N27): 1.0 in both v2 runs.** No
+  earlier tool arm found it (crew-30min had N26 0.5/0.0 and N27 0/0). The
+  source was `atlas anomalies` (called once per run; 15 mentions in its
+  output), and both reports used it. That's about +0.05 coverage. A
+  deterministic detector caught what reading and ranking could not.
+- **Cost:**
+  - agent input 33–36M tokens, against 41–55M (crew-30min) and 22–25M
+    (atlas-30min);
+  - 182–206 turns, against 241–263;
+  - reader input 0.1–0.5M.
+- **Mechanics:**
+  - reader quotes 96–97% verified;
+  - background digest at 4–6% of the budget;
+  - automatic gap check at about 61%;
+  - no errors.
+
+**What went wrong, with causes:**
+1. **The deeper sweep (step 18) lost the seeded-shuffle finding (N29
+   1.0/1.0 → 0/0; also N31).**
+   - In crew-30min the evidence reached the agent through sweep picks of
+     records in clusters of 13 and 17 copies (actively edited coordination
+     pages inside the big themes), picked as theme examples.
+   - 64 of the 71 `random.shuffle` rows sit in clusters of 6–50 copies.
+   - Step 18 cut theme examples from a quarter to an eighth and aimed the
+     sweep at rare clusters (≤5). The middle band of salient, mid-sized
+     clusters now gets almost nothing.
+   - In v2 the evidence never surfaced in any tool output.
+2. **Skipping atlas's top 50 in the sweep (step 18) contradicted an earlier
+   lesson.**
+   - The rule assumed the agent reads what atlas lists. In fact, v2 run 2
+     saw 36 of the top 50 as listing lines and opened 1; run 1 opened 3.
+     Agents act on listings without opening them, as the first pilots
+     showed.
+   - 9 of 25 bypass-evidence records (`--resolve`, NO_PROXY) are in the top
+     50. The background sweep's bypass content fell from 5–6 mentions
+     (crew-30min) to 0–2.
+3. **v2 run 2 drifted away from the bypass story.**
+   - Few bypass mentions in any source (crew 4, atlas 2, against 26 from
+     atlas in crew-30min run 2).
+   - 40 `rows`/`count` calls.
+   - A report with a 646-word timeline and 180 words on proxies and the
+     bypass.
+   - It lost most of the GET-write and bypass findings (N17–N25 mostly
+     0–0.5), which run 1 kept. This is partly run-to-run variance and
+     displacement under the 3,000-word cap (all reports are at the cap),
+     and partly cause 2: the push toward that material had gone.
+4. **R5a and R5b (step 20) had no effect.**
+   - `crew notes` was never called.
+   - The gap checker's unused-note items (3–4 per run) were minor
+     link-collection pages (Dublin Core XML, archival download URLs). None
+     was used or dismissed: ranking by note kind, then storage order,
+     doesn't pick important notes.
+   - The look-alike item never fired, since both reports already had the
+     look-alike.
+5. **Inference findings stay at 0 in every arm** (N09 scale implies an AI
+   company, N36 what tunnels enable, N38 why activity dropped). Neither tool
+   targets them.
+
+**Next to explore** (proposed to the user):
+1. **Fix the sweep (it reverses losses caused by step 18):**
+   - skip only records the agent opened or readers read; listed but
+     unopened records are prime candidates for a deep read;
+   - split each sweep by cluster size (singletons, 2–5, 6–50, a few of the
+     largest), choosing within each band by salience and diversity.
+2. **Rank unused-note gap-check items by the record's importance** (cluster
+   salience; contradiction or untouched topic) rather than note kind. Cap
+   them at 1–2, or drop them.
+3. **Drop `crew notes` from the prompt,** or show the best unseen notes in
+   `atlas unseen`: agents don't call opt-in tools.
+4. **Displacement:** a generic Consider item when one section takes far more
+   than its share of a capped report, phrased as a question.
+5. **The implications pass (idea 4)** for inference findings.
+6. **Evaluation:** v1 and v2 ran on different days with 2 epochs. Per-finding
+   attribution is more informative than the means. For comparing sweep
+   variants: paired arms run at the same time, 3–4 epochs; 10-minute runs
+   for mechanics.
+
+## Step 22: sweep skip rule and size bands; reader notes pushed and offered (measured option 3)
+
+Agreed with the user after the v2 analysis. The decisions were taken from concepts the
+tools already rely on, not from what the last run or the known answers would reward.
+
+**Sweep (`records.sweep_rows`):**
+- **What it skips:** only what was read. That means units the agent opened, rows it saw
+  in full, and rows readers read. A listing line isn't reading (agents act on listings
+  without opening them, as the first pilots showed), so listed records and atlas's
+  top-50 most salient records are candidates again.
+- **Size bands:** clusters are sampled in bands at atlas's existing "small cluster"
+  boundary (5) and an order of magnitude above (50). The bands are rare ≤5, mid-size
+  6–50 and the largest, on the reasoning that informative records occur at every
+  rarity.
+- **Shares after windows:** theme examples 1/8, rare 0.45, mid 0.30, largest 0.05, the
+  rest spread over time. Within a band, clusters are taken by salience and diversified.
+- **Mid-size clusters:** the latest unread version is read, since an evolving record's
+  latest version carries the accumulated content.
+- **Wiki sweep of 150:** 67 rare, 45 mid, 18 theme, 7 repeated, 13 spread. Mythos 5:
+  60 window first, then the bands. RubyHack: rare and spread (it has almost no mid-size
+  clusters).
+
+**Reader notes, push a little and offer the rest (`atlas/notes.py`):**
+- **Ranking:**
+  - primary: the salience of the note's record (the score behind `unseen`);
+  - note kind as a mild modifier (×0.75–1.0);
+  - records the agent read itself last.
+  - For short pushes, one note per record and no near-duplicate wording.
+
+  No weights were fitted to a run. The extra "large clusters down" factor tried in the
+  log check was not adopted, since salience already penalises size.
+- **Shown state lives in the sandbox:** notes carry a key and a `shown` flag (shown by
+  the crew's own output), and atlas logs what it shows (`notes-shown` entries in the
+  coverage log).
+- **`atlas unseen`** ends with "Reader notes not shown yet": up to 3, followed by "K
+  more: crew notes". Once a note on a record has been shown, that record counts as
+  covered.
+- **`atlas notes [REGEX]`** (hidden from `--help`) lists every matching note, not shown
+  first, in ranked order. The crew's `notes` action now calls it in the sandbox, so
+  there is one source of truth.
+- **`gapcheck`'s unused-note items** use the same ranking, capped at 2 (was 3, ranked by
+  kind).
+- **Offering `crew notes`:** the sentence moved out of the crew prompt paragraph into the
+  crew arm's early-finish nudge ("… and `crew notes` lists what readers noted that you
+  have not seen yet"), a decision point. The tool description and the "N more verified
+  notes … crew notes" line in crew outputs stay.
+- **Metrics:** `usage_metrics.py` prints how many notes atlas showed.
+
+**Log check behind the decision** (diagnostic only; the topic words came from the rubric
+and are not used by the tools):
+- In v2, 5–6% of unshown notes bore on findings the reports got partly or not at all
+  (survival and beacons, the ZZZ backup page, GET-write requests, bypass reproductions).
+- There were no notes at all for the seeded shuffle, the tunnels or Azure IPs: a reach
+  problem.
+- Storage-order and kind ranking put about 0 relevant notes in a top 10. Record-salience
+  ranking put 5 in run 2 (base rate about 0.6) and 0 in run 1.
+
+**Verified:**
+- New and rewritten tests:
+  - sweep: keeps listed records, skips opened ones, samples every band (mid band read
+    from a 40-copy cluster), moves on;
+  - notes: salient record first, one per record in the push, crew-shown notes excluded,
+    not pushed twice, a record covered once any note on it was shown, the full listing
+    keeps every note, bad regex handled;
+  - `crew notes` delegates to atlas.
+- A sandbox mock: the crew output showed 1 note and kept 1; `unseen` pushed the kept one;
+  `crew notes` listed both. The prompt doesn't mention `crew notes`; the nudge does.
+- 55 atlas and crew tests; full suite apart from the 2 pre-existing `node` failures;
+  ruff clean. README updated.
+
+## 30-minute crew run v0.2.3 (step 22: sweep bands, notes pushed)
+
+`logs/crew-30min-v0.2.3`, same command as the earlier crew runs, 2 epochs.
+
+| arm | raw findings | coverage | TL;DR | combined | full / partial / zero |
+|---|---|---|---|---|---|
+| baseline-30min | 0.426 | 0.272 | 0.55 | 0.355 | 18 / 33 / 25 |
+| atlas-30min | 0.554 | 0.406 | 0.60 | 0.464 | 28 / 32 / 16 |
+| crew-30min | 0.566 | 0.432 | 0.60 | 0.482 | 31 / 27 / 18 |
+| crew-30min-v0.2.3 | 0.605 | 0.463 | 0.60 | 0.504 | 32 / 29 / 15 |
+
+Per run: 0.563 / 0.442 / 0.60 / 0.489 and 0.647 / 0.484 / 0.60 / 0.519.
+
+- **The look-alike finding (N26, N27) held at 1.0 in both runs**, from `anomalies`.
+- **The seeded shuffle (N29) came back in one run** (0/1.0; it was 0/0 in the superseded
+  v2 run).
+- **Tunnels (N34) were partly found** (0.3/0.7), for the first time in a tool arm at this
+  level.
+- **The weakest finding:** heartbeats after R5 (N33, 0/0.3).
+- **Usage:** 3–4 crew calls per run besides the background sweep (sweeps, `ask` on grep
+  and row sets); 484–517 records read; 96% of quotes verified; 516 and 508 notes kept;
+  atlas showed 15 and 9 of them (in `unseen` and `crew notes`).
+- **Cost:** agent input 25–33M tokens over 147–197 turns, about atlas-30min's level and
+  below crew-30min's.
+- With 2 epochs per arm the differences remain within run-to-run variation.

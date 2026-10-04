@@ -35,12 +35,9 @@ FIX_NOT_FOUND_WORDS = 6  # shorter unmatched quotes are only Consider items
 NEAR_MATCH = 0.5  # below this similarity a long unmatched quote is "not found" (Fix); above it, Consider
 MAX_FIX = 10
 MAX_CONSIDER = 8
-MAX_UNUSED_NOTES = 3  # reader notes the report does not use, among the Consider items
+MAX_UNUSED_NOTES = 2  # reader notes the report does not use, among the Consider items
 MAX_UNUSED_ANOMALIES = 2
 RESERVED = 2  # Consider slots kept for unused reader notes and anomalies
-# Reader note kinds, most worth a second look first.
-NOTE_WEIGHT = {"unexpected": 1.0, "outcomes": 0.8, "actions": 0.8, "claims": 0.7, "answer": 0.7,
-               "open_questions": 0.5, "actors": 0.4, "times": 0.4}
 _KEY_TERM = re.compile(r"[\w.@/-]*\d[\w.@/-]*|\b[A-Z][a-z]+[A-Z]\w*|\b\w{9,}\b")
 _LOOKALIKE_WORDS = re.compile(r"cyrillic|greek|homoglyph|look-?alike|confusable|unicode|non-ascii|mixed[- ]script")
 
@@ -593,27 +590,18 @@ def unused_checks(idx: Index, rep: Report) -> list[Item]:
     report, and high-precision anomalies (look-alike identifiers, disguised mixed-script
     words) the report does not mention."""
     items: list[Item] = []
+    from .notes import KIND_WEIGHT, ranked
+
     cited = _cited_rows(idx, rep)
-    seen_rows: set[tuple[str, int]] = set()
-    notes = []
-    for n in coverage.load_notes():
-        table, _, line = str(n.get("ref", "")).rpartition(":")
-        if table not in idx.tables or not line.isdigit():
-            continue
-        row = (table, int(line) - 1)
-        if row in cited or row in seen_rows:
-            continue
-        if _covered(f"{n.get('quote', '')} {n.get('note', '')}", rep.norm):
-            continue
-        seen_rows.add(row)
-        notes.append((NOTE_WEIGHT.get(n.get("kind"), 0.4), n))
-    notes.sort(key=lambda x: -x[0])
-    for w, n in notes[:MAX_UNUSED_NOTES]:
+    unused = [n for n in coverage.load_notes()
+              if not _covered(f"{n.get('quote', '')} {n.get('note', '')}", rep.norm)]
+    # Same ranking as everywhere else notes are shown: salient records first, one per record.
+    for n in ranked(idx, unused, skip_rows=cited)[:MAX_UNUSED_NOTES]:
         quote = " ".join(str(n.get("quote", "")).split()[:20])
         items.append(Item("consider", f"note|{n['ref']}|{normalize(quote)[:60]}",
                           f"a reader noted ({n.get('kind')}, {n.get('cite') or n['ref']}): {n.get('note', '').strip()} "
                           f'— "{quote}". The report does not use it. Material to your account?',
-                          score=0.25 + 0.2 * w))
+                          score=0.25 + 0.2 * KIND_WEIGHT.get(n.get("kind"), 0.4)))
     from .anomalies import lookalike_groups, mixed_script_tokens, skeleton
 
     anomalies = []

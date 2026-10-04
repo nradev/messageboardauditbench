@@ -43,7 +43,6 @@ ATLAS_BIN = "/home/agent/.local/bin/atlas"
 # Every verified reader note, one JSON object per line; `atlas gapcheck` reads it (the
 # file atlas expects next to its coverage log, /tmp/atlas-coverage.jsonl).
 NOTES_PATH = "/tmp/atlas-notes.jsonl"
-NOTES_SHOWN = 30  # notes listed per `crew notes` call
 
 # The schema: what a reader notes about any set of records.
 KINDS = {
@@ -278,9 +277,11 @@ class Crew:
             if key in self._note_keys:
                 continue
             self._note_keys.add(key)
+            quote = str(it.get("quote", "")).strip()
             n = {"kind": it.get("kind") or "answer", "note": str(it.get("note") or it.get("answer") or "").strip(),
-                 "quote": str(it.get("quote", "")).strip(), "ref": it["ref"], "cite": it.get("cite") or it["ref"],
-                 "source": source, "shown": id(it) in shown}
+                 "quote": quote, "ref": it["ref"], "cite": it.get("cite") or it["ref"],
+                 "source": source, "shown": id(it) in shown,
+                 "key": f"{it['ref']}|{' '.join(quote.lower().split())[:80]}"}
             if question:
                 n["question"] = question[:200]
             self.notes.append(n)
@@ -702,31 +703,12 @@ async def ask(crew: Crew, spec: str, question: str, where: list[str]) -> str:
 
 # ---------- notes (R5a) ----------
 
-KIND_ORDER = ["unexpected", "outcomes", "actions", "claims", "answer", "open_questions", "actors", "times"]
 
-
-def list_notes(crew: Crew, pattern: str) -> str:
-    """The run's kept reader notes, those not shown yet first, filtered by a regex."""
-    if not crew.notes:
-        return "crew notes: no notes yet; they are kept from crew brief, ask and sweep calls."
-    try:
-        rx = re.compile(pattern, re.I) if pattern else None
-    except re.error as e:
-        return f"crew notes: bad regex: {e}"
-    pool = [n for n in crew.notes if rx is None or rx.search(f"{n['note']} {n['quote']} {n['cite']} {n['kind']}")]
-    pool.sort(key=lambda n: (n["shown"], KIND_ORDER.index(n["kind"]) if n["kind"] in KIND_ORDER else 9))
-    shown = pool[:NOTES_SHOWN]
-    head = (f"crew notes{f' /{pattern}/' if pattern else ''}: {len(pool)} of {len(crew.notes)} kept notes match; "
-            f"{sum(1 for n in pool if not n['shown'])} not shown before. Listing {len(shown)}, not shown first:")
-    out = [head]
-    for n in shown:
-        tag = n["kind"] + ("" if n["shown"] else ", new")
-        out.append(f"- ({tag}; {n['source']}) {n['note']} — \"{_short(n['quote'], 25)}\" [{n['cite']}]")
-        n["shown"] = True
-    if len(pool) > len(shown):
-        out.append(f"… {len(pool) - len(shown)} more: call again (shown notes move to the end) or narrow with a regex.")
-    out.append("Quotes were checked against their records when stored; confirm what you rely on with atlas show.")
-    return "\n".join(out)
+async def list_notes(pattern: str) -> str:
+    """`crew notes`: atlas lists the kept notes (ranked, not shown before first) in the
+    sandbox, where it also tracks which notes the agent has seen."""
+    result = await sandbox().exec([ATLAS_BIN, "notes", *([pattern] if pattern else [])], timeout=120)
+    return (result.stdout if result.success else f"{result.stdout}\n{result.stderr}").strip() or "(no output)"
 
 
 # ---------- the tool ----------
@@ -780,7 +762,7 @@ def crew_tool(crew: Crew) -> Tool:
                             "will arrive automatically. Use crew brief / crew ask meanwhile.")
                 return await sweep(crew)
             if action == "notes":
-                return list_notes(crew, (target or "").strip())
+                return await list_notes((target or "").strip())
             if not (target or "").strip():
                 return f"crew {action}: give a target set, e.g. target=\"t3\" or \"grep:timeout\""
             if action == "brief":
