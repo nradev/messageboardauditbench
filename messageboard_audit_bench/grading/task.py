@@ -55,8 +55,10 @@ def report_from_sample():
 def _german_wiki_report_grade(
     dir: str = "round4_blind120",  # noqa: A002 — the Inspect task parameter is named `dir`
     rubric: str = "v2",
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     variant: str | None = None,
+    judge_effort: str | None = None,
+    single_call: bool = False,
 ) -> Task:
     """Grade every staged report in `dir` against `rubric`.
 
@@ -68,6 +70,12 @@ def _german_wiki_report_grade(
         reports otherwise select their variant from data_variant per sample.
       judge: Inspect model used to grade. As on the audit task, a ``grader``
         model role supplied to Inspect takes precedence over this value.
+      judge_effort: the judge's starting reasoning effort: ``xhigh`` (default, as
+        published), ``high``, ``medium`` or ``low``. Lower is faster and cheaper but
+        scores differently; compare only grades made at the same effort.
+      single_call: grade all of a findings rubric's sheets (``v2``) in one judge call per
+        report instead of one per sheet. Faster and cheaper; scores are not
+        interchangeable with per-sheet grades.
     """
     folder = staged_dir(dir)
     core.require_original_benchmark_folder(folder)
@@ -99,7 +107,10 @@ def _german_wiki_report_grade(
     return Task(
         dataset=samples,
         solver=report_from_sample(),
-        scorer=sheet_scorer(rubric=rubric, judge=judge, variant=variant),
+        scorer=sheet_scorer(
+            rubric=rubric, judge=judge, variant=variant, effort=judge_effort,
+            single_call=single_call,
+        ),
         model="mockllm/model",
         metadata={
             "benchmark": "German wiki report",
@@ -107,6 +118,8 @@ def _german_wiki_report_grade(
             "mode": "grading",
             "rubric": rubric,
             "judge": judge,
+            "judge_effort": judge_effort or "xhigh",
+            "grading_calls": "single" if single_call else "per_sheet",
             "staged_dir": folder.name,
         },
     )

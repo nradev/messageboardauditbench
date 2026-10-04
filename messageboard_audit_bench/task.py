@@ -75,7 +75,7 @@ from messageboard_audit_bench.benchmarks import (
     urlquery_manifest,
 )
 from messageboard_audit_bench.configs import CONFIG_NAME, load_config
-from messageboard_audit_bench.grading.core import variant_for_data
+from messageboard_audit_bench.grading.core import SINGLE_CALL_MODES, variant_for_data
 from messageboard_audit_bench.grading.finding_scorer import finding_scorer
 from messageboard_audit_bench.grading.scorer import sheet_scorer
 from messageboard_audit_bench.incidents import (
@@ -132,6 +132,25 @@ def _time_limit(
     return value
 
 
+def _token_budget(token_budget: int | None, cfg: dict) -> int | None:
+    """The output-token budget, or ``None`` for a wall-clock trial.
+
+    Only configs that declare ``budget_tokens`` (and so render a token prompt)
+    accept the ``token_budget`` override.
+    """
+    if "budget_tokens" not in cfg:
+        if token_budget is not None:
+            raise ValueError(
+                f"config {cfg.get('name')!r} has a time budget; token_budget needs a "
+                "config with budget_tokens, such as blind-tokens"
+            )
+        return None
+    value = cfg["budget_tokens"] if token_budget is None else token_budget
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("token_budget must be a positive integer")
+    return value
+
+
 def _min_runtime_fraction(min_runtime_fraction: float | None) -> float:
     """Validate the proportion of an agent budget that must be used.
 
@@ -168,11 +187,17 @@ def _prompt_for(
     min_runtime_fraction: float | None = None,
     benchmark_id: str = "messageboard",
     allow_drafts: bool = False,
+    token_budget: int | None = None,
 ) -> str:
     cfg = _load_config(config_name, benchmark_id, allow_drafts)
     budget_minutes = _time_limit(time_limit_minutes, int(cfg["budget_min"]))
     fraction = _min_runtime_fraction(min_runtime_fraction)
+    budget_tokens = _token_budget(token_budget, cfg)
     text = (repo_root() / "sandbox" / "prompts" / f"{cfg['prompt']}.txt").read_text()
+    if budget_tokens is not None:
+        return render_prompt(
+            text, budget_minutes, *limits(cfg), budget_tokens=budget_tokens
+        ) + runtime_policy.token_instruction(fraction, budget_tokens)
     return render_prompt(text, budget_minutes, *limits(cfg)) + (
         _minimum_runtime_instruction(budget_minutes * 60, fraction)
     )
@@ -268,7 +293,13 @@ def _inspect_sandbox(
     )
 
 
-def _scorers(judge: str, rubric: str | None, data_variant: str | None = None) -> list:
+def _scorers(
+    judge: str,
+    rubric: str | None,
+    data_variant: str | None = None,
+    judge_effort: str | None = None,
+    judge_single_call: bool = False,
+) -> list:
     """Benchmark sheets plus diagnostic scores; legacy grading is explicit."""
     scorers = [process_metrics(), report_length()]
     if rubric == "legacy":
@@ -278,7 +309,10 @@ def _scorers(judge: str, rubric: str | None, data_variant: str | None = None) ->
     if len(modes) != len(set(modes)):
         raise ValueError("rubric must not contain duplicate modes")
     return [
-        sheet_scorer(rubric=mode, judge=judge, variant=variant_for_data(data_variant))
+        sheet_scorer(
+            rubric=mode, judge=judge, variant=variant_for_data(data_variant), effort=judge_effort,
+            single_call=judge_single_call and mode in SINGLE_CALL_MODES,
+        )
         for mode in modes
     ] + scorers
 
@@ -302,10 +336,13 @@ def _audit_task(
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
+    token_budget: int | None = None,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
     ``allow_drafts`` admits the draft incidents; only `incident_task` sets it.
+    A config with ``budget_tokens`` runs on an output-token budget instead of
+    time; ``time_limit_minutes`` is then only the wall-clock backstop.
     """
     spec = SPECS[benchmark_id]
     cfg = _load_config(config, benchmark_id, allow_drafts)
@@ -347,10 +384,20 @@ def _audit_task(
         raise ValueError("policy_aware_continue is only supported with agent=react and backend=inspect")
     budget_min = _time_limit(time_limit_minutes, int(cfg["budget_min"]))
     runtime_fraction = _min_runtime_fraction(min_runtime_fraction)
-    minimum_runtime_seconds = runtime_policy.minimum_runtime_seconds(
-        budget_min * 60, runtime_fraction
+    budget_tokens = _token_budget(token_budget, cfg)
+    if budget_tokens is not None and (agent != "react" or backend != "inspect"):
+        raise ValueError(
+            "a token budget needs agent='react' and backend='inspect'; the CLI "
+            "scaffolds only support a time budget"
+        )
+    # On a token budget the minimum-runtime policy counts tokens, not seconds.
+    minimum_runtime_seconds = (
+        0
+        if budget_tokens is not None
+        else runtime_policy.minimum_runtime_seconds(budget_min * 60, runtime_fraction)
     )
     cleanup_timeout_minutes = budget_min + TIMEOUT_GRACE_MINUTES
+    budget_label = f"{budget_tokens}tok" if budget_tokens is not None else f"{budget_min}m"
     identity = (
         {"incident": incident_for_variant(cfg["data_variant"]).id}
         if benchmark_id == "messageboard"
@@ -365,7 +412,12 @@ def _audit_task(
             "network_none" if backend == "inspect" else "provider_network_shared"
         ),
         "config": config,
-        "budget_min": budget_min,
+        "budget_min": None if budget_tokens is not None else budget_min,
+        **(
+            {"budget_tokens": budget_tokens, "wall_clock_limit_min": budget_min}
+            if budget_tokens is not None
+            else {}
+        ),
         "min_runtime_fraction": runtime_fraction,
         "minimum_runtime_seconds": minimum_runtime_seconds,
         "data_variant": cfg["data_variant"],
@@ -389,9 +441,11 @@ def _audit_task(
     if subscription_model is not None:
         sample_metadata["subscription_model"] = subscription_model
     sample = Sample(
-        input=_prompt_for(config, budget_min, runtime_fraction, benchmark_id, allow_drafts)
+        input=_prompt_for(
+            config, budget_min, runtime_fraction, benchmark_id, allow_drafts, budget_tokens
+        )
         + prompt_addendum(investigation_tools),
-        id=f"{agent}:{backend}:{config}:{budget_min}m"
+        id=f"{agent}:{backend}:{config}:{budget_label}"
         + "".join(f"+{t}" for t in investigation_tools),
         metadata=sample_metadata,
     )
@@ -408,6 +462,7 @@ def _audit_task(
             policy_aware_continue_enabled=policy_aware_continue,
             gapcheck_at=float(gapcheck_at) if gapcheck_at is not None else None,
             sweep_at_start=bool(sweep_at_start),
+            output_token_budget=budget_tokens,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -454,6 +509,7 @@ def _audit_task(
             "scaffold": _scaffold(agent, backend),
             "config": config,
             "time_limit_minutes": budget_min,
+            **({"budget_tokens": budget_tokens} if budget_tokens is not None else {}),
             "min_runtime_fraction": runtime_fraction,
             "minimum_runtime_seconds": minimum_runtime_seconds,
             "hard_time_limit_minutes": cleanup_timeout_minutes,
@@ -480,7 +536,7 @@ def _german_wiki_report(
     allow_networked_subscription: bool = True,
     time_limit_minutes: int | None = None,
     min_runtime_fraction: float = 0.75,
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     rubric: str | None = None,
     data_variant: str | None = None,
     version: str | None = None,
@@ -488,6 +544,9 @@ def _german_wiki_report(
     policy_aware_continue: bool = False,
     gapcheck_at: float | None = None,
     sweep_at_start: bool = False,
+    token_budget: int | None = None,
+    judge_effort: str | None = None,
+    judge_single_call: bool = False,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -498,21 +557,32 @@ def _german_wiki_report(
         subscription_model: CLI model identifier for the subscription backend.
             Native runs select their model with Inspect's ``--model`` option.
         config: Named prompt/data/effort configuration from ``configs/``:
-            ``blind`` (default), ``context`` or ``blind-anthropic``.
+            ``blind`` (default), ``context``, ``blind-anthropic`` or
+            ``blind-tokens`` (output-token budget; native ReAct only).
         time_limit_minutes: Trial budget in minutes. Overrides the named
             config's declared default. Native runs have a separate
-            five-minute outer guard for cleanup and log recovery.
-        min_runtime_fraction: Fraction of the agent budget that must elapse
-            before normal completion is accepted. Defaults to ``0.75``; set
+            five-minute outer guard for cleanup and log recovery. On a
+            token-budget config this is only the wall-clock backstop.
+        token_budget: Output-token budget, reasoning included. Overrides
+            ``budget_tokens`` of a token-budget config such as ``blind-tokens``;
+            rejected for time-budget configs.
+        min_runtime_fraction: Fraction of the agent budget (time, or output
+            tokens on a token-budget config) that must be used before normal
+            completion is accepted. Defaults to ``0.75``; set
             ``0`` to disable this continuation policy for an ablation.
         judge: Inspect model used to grade the report. A ``grader`` model role,
             when supplied to Inspect, takes precedence over this value.
+        judge_effort: The judge's starting reasoning effort (default ``xhigh``, as
+            published; ``medium`` is faster and cheaper for iteration but scores
+            differently).
+        judge_single_call: Grade the findings rubric in one judge call per report
+            instead of one per sheet; the TL;DR rubric is unaffected.
         rubric: Comma-separated sheet modes; defaults to ``v2,tldrh`` (findings
             and the TL;DR summary). Use Inspect's ``--no-score`` to defer grading,
             or ``legacy`` for the old starter rubric.
         data_variant: Override the config's dataset, including
             ``verbatim_anthropic`` for the provider attribution ablation.
-        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``10.0``). The task
+        version: Expected benchmark version (``MAJOR.MINOR``, e.g. ``12.2``). The task
             refuses to run if this checkout is a different version; use
             ``scripts/run_eval.py --version`` to run another one.
         tools: Comma-separated investigation tools for ``agent=react``: ``atlas``, and
@@ -546,11 +616,12 @@ def _german_wiki_report(
         time_limit_minutes=time_limit_minutes,
         min_runtime_fraction=min_runtime_fraction,
         data_variant=data_variant,
-        scorers=_scorers(judge, rubric, variant),
+        scorers=_scorers(judge, rubric, variant, judge_effort, judge_single_call),
         tools=tools,
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,
         sweep_at_start=sweep_at_start,
+        token_budget=token_budget,
     )
 
 
@@ -566,7 +637,7 @@ def incident_task(config: str, **kwargs) -> Task:
     RubyHack). It is not an Inspect task: drafts become their own eval once reviewed.
     """
     variant = _load_config(config, allow_drafts=True)["data_variant"]
-    scorer_args = {"judge": kwargs.pop("judge", "openai/gpt-5.6-sol"), "rubric": kwargs.pop("rubric", None)}
+    scorer_args = {"judge": kwargs.pop("judge", "anthropic/claude-opus-5-5"), "rubric": kwargs.pop("rubric", None)}
     defaults = {"agent": "claude", "backend": "inspect", "subscription_model": None,
                 "allow_networked_subscription": True, "time_limit_minutes": None,
                 "min_runtime_fraction": 0.75, "data_variant": None}
@@ -651,7 +722,7 @@ urlquery_audit_bench = task(name="urlquery_audit_bench")(_transluce_report)
 def _german_wiki_report_replay(
     runs_glob: str = "*",
     include_failed: bool = True,
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     rubric: str | None = None,
 ) -> Task:
     """Import local run artifacts into Inspect without rerunning agents."""
@@ -729,7 +800,7 @@ def _german_wiki_report_continue(
     parent_log: str,
     parent_epochs: str = "all",
     config: str = "followup-5k",
-    judge: str = "openai/gpt-5.6-sol",
+    judge: str = "anthropic/claude-opus-5-5",
     rubric: str | None = None,
 ) -> Task:
     """Continue finished ReAct samples with a follow-up request.

@@ -537,21 +537,38 @@ def test_native_agents_use_the_shared_bounded_refusal_policy(
         assert captured["config_overrides"] == {"features.hooks": "true"}
     else:
         assert len(captured["tools"]) == 2
-        for tool in captured["tools"]:
-            parameters = native.ToolDef(tool).parameters
-            assert set(parameters.required or []) == set(parameters.properties or {})
+        editor = native.ToolDef(captured["tools"][1]).parameters
+        # the standard schema: only the arguments common to every command
+        assert set(editor.required or []) == {"command", "path"}
 
 
-def test_react_text_editor_optional_parameters_remain_nullable() -> None:
+@pytest.mark.parametrize("all_required", [True, False])
+def test_react_text_editor_optional_parameters_remain_nullable(all_required) -> None:
     editor = native._with_react_feedback(
-        native.text_editor(), {"MBAB_BUDGET_MIN": "1"}
+        native.text_editor(), {"MBAB_BUDGET_MIN": "1"}, require_all_parameters=all_required
     )
     parameters = native.ToolDef(editor).parameters
 
-    assert set(parameters.required or []) == set(parameters.properties or {})
+    expected = set(parameters.properties or {}) if all_required else {"command", "path"}
+    assert set(parameters.required or []) == expected
     for name in set(parameters.properties or {}) - {"command", "path"}:
         schema = parameters.properties[name]
         assert any(option.type == "null" for option in schema.anyOf or [])
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("openrouter/openai/gpt-5.6-sol", True),
+        ("openrouter/openai/gpt-6-astra", True),
+        ("openai/gpt-6-luna", False),
+        ("openrouter/xiaomi/mimo-v2.6-flash", False),
+        ("openrouter/z-ai/glm-5.3", False),
+        ("anthropic/claude-opus-5-5", False),
+    ],
+)
+def test_only_openrouter_openai_models_get_the_all_required_schema(model, expected) -> None:
+    assert native.require_all_tool_parameters(model) is expected
 
 
 @pytest.mark.asyncio

@@ -109,7 +109,32 @@ def test_tldr_rubrics_see_the_summary_only() -> None:
         _, prefix, suffix = core.build_prompt(mode, sets[0]["rubric_id"], doc, templates)
         assert body_marker not in prefix + suffix
         assert "A short summary." in suffix
+    # an H1 summary followed by H2 sections ends at the first H2 too
+    h1_doc = f"# TL;DR\nA short summary.\n\n## Findings\n{body_marker}\n"
+    for mode in ("tldr", "tldrh"):
+        sets, templates = core.load_sheets(mode)
+        _, prefix, suffix = core.build_prompt(mode, sets[0]["rubric_id"], h1_doc, templates)
+        assert body_marker not in prefix + suffix
+        assert "A short summary." in suffix
     # and the full-report rubrics do see it
     sets, templates = core.load_sheets("v2")
     _, prefix, suffix = core.build_prompt("v2", sets[0]["rubric_id"], doc, templates)
     assert body_marker in suffix
+
+
+def test_tldr_extraction_ends_at_the_reports_section_level() -> None:
+    cases = {
+        # deeper headings inside the summary stay in it
+        "## TL;DR\nLead.\n### Point\nDetail.\n## Timeline\nBody.\n": ["Lead.", "Detail."],
+        # a title above the summary does not change its level
+        "# Report\n## TL;DR\nLead.\n## Timeline\nBody.\n": ["Lead."],
+        # H1 summary, H2 sections: stop at the first H2
+        "# TL;DR\nLead.\n## Timeline\nBody.\n": ["Lead."],
+        # H1 summary with H3 points and H2 sections
+        "# TL;DR\nLead.\n### Point\nDetail.\n## Timeline\nBody.\n": ["Lead.", "Detail."],
+    }
+    for doc, kept in cases.items():
+        tldr, how = core.extract_tldr(doc)
+        assert how == "heading"
+        assert all(part in tldr for part in kept), doc
+        assert "Body." not in tldr, doc

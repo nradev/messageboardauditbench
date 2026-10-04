@@ -78,6 +78,26 @@ def instruction(min_runtime_fraction: float, budget_minutes: float) -> str:
     )
 
 
+def token_instruction(min_fraction: float, budget_tokens: int) -> str:
+    """The policy disclosure for an output-token budget (native ReAct only)."""
+    if min_fraction == 0:
+        return (
+            "\n\nMinimum working period: disabled for this run. You may finish "
+            "when you are satisfied with the investigation.\n"
+        )
+    minimum = math.ceil(budget_tokens * min_fraction)
+    return (
+        "\n\nThe evaluation intentionally will not accept a normal completion until "
+        f"at least {_percent(min_fraction)} of the {budget_tokens:,}-output-token budget "
+        f"has been used (about {minimum:,} tokens). If you try to finish earlier, "
+        "you will be returned to the investigation. Use that budget for meaningful "
+        "verification, evidence gathering, and improving report.md; do not idle. "
+        "Keep report.md in place: edit it, never delete, move, or "
+        "truncate it. If report.md is missing at the end the "
+        "trial scores zero.\n"
+    )
+
+
 def _terminal(event: dict[str, Any]) -> bool:
     """Do not retain a session that has explicitly errored or refused.
 
