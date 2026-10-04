@@ -43,7 +43,7 @@ from messageboard_audit_bench.native_telemetry import event_coverage, hook_cover
 from messageboard_audit_bench.provenance import host_provenance
 from messageboard_audit_bench.reading_crew import (
     Crew,
-    crew_tool,
+    crew_tools,
     start_background_sweep,
     take_background_digest,
 )
@@ -720,7 +720,7 @@ def inspect_native_agent(
             extra_tools.append(atlas_tool())
         if "crew" in investigation_tools:
             crew = Crew(deadline_epoch=deadline_epoch)
-            extra_tools.append(crew_tool(crew))
+            extra_tools.extend(crew_tools(crew))
             if sweep_at_start:
                 start_background_sweep(crew)
         seed_report = (

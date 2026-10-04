@@ -632,3 +632,82 @@ report tokens (agent and readers), calls and cost next to the scores.
   quality.
 - Before claiming generality: a held-out corpus (urlquery, or the Mythos 5 /
   RubyHack drafts with their rubrics) and a second model.
+
+# Plan: final writer (from PR #2, without the agent-written ledger)
+
+**Origin.** PR #2 (`ledger_writer`) proposes that the agent keep an evidence ledger and
+that a fresh model rewrite the report from the draft and the ledger at the end. The
+ledger is the agent-written version of idea 6. We had set that aside because agents
+rarely use opt-in tools, and replaced it with harness-kept reader notes (R5-lite). The
+writer idea stands on its own: the harness already holds verified, report-relevant
+material, so a writer can be fed automatically at no cost in agent turns. Status:
+planned, not built; PR #2 itself is not merged.
+
+**Why a fresh writer.** Our agents build reports through 100–200 small edits inside a
+very long context, and every 30-minute report hit the 3,000-word cap. Several findings
+were seen and then left out (the June 22 drop, the ZZZ backup page, bypass material in
+one run). This is the selection and displacement problem, open item 4 of the v2 run
+analysis. A fresh writer sees the material at once in a clean context and can rebalance
+the whole report against the cap instead of patching it. It does not help discovery:
+nothing reaches the report that the investigation did not surface.
+
+**Inputs, most valuable first:**
+1. **The agent's draft (essential).** It carries the investigator's framing, judgement and
+   citations, so it's the backbone. The writer keeps its supported findings and may
+   compress them.
+2. **`atlas gapcheck` on the draft.** The most compact, generic statement of what the
+   report gets wrong or leaves out.
+   - Fix items (citations or quotes that don't hold) are to be corrected.
+   - Consider items (themes not discussed, undated events, look-alike identifiers, unused
+     reader notes, thin passages) come with the usual framing: include only what's
+     material.
+3. **Verified reader notes the report does not use** (crew arms). The top-ranked unseen
+   ones, by the same ranking as `unseen` and the gap check (`atlas/notes.py`), capped at
+   a few dozen. They are quote-checked, carry refs, and cover material the agent never
+   had time to absorb.
+4. **Excerpts of the records the report cites, and of records the agent opened but did not
+   cite**, from the coverage log, using `atlas records` excerpts. They let the writer check
+   and sharpen claims against actual text, and recover details from records the agent
+   looked at and dropped.
+5. **A short structural map of the corpus:** themes with sizes and actors, the timeline's
+   main events, `anomalies` hits. It helps the writer judge proportion and write the
+   TL;DR. This is the input most likely to tempt the writer into unexamined claims, so
+   it is marked as context only and never cited.
+
+**Not fed:**
+- the full agent trajectory (too large and noisy; the draft distils it);
+- raw corpus beyond the excerpts above (that would make the writer a second
+  investigator);
+- anything derived from the grading answers.
+
+**Guardrails:**
+- **Cite only what it was given.** Every factual claim cites a ref present in the inputs
+  (draft, notes, excerpts); nothing is quoted that isn't in the provided text.
+- **Gap-check the final report.** New Fix items get one repair call; if they persist, the
+  draft is kept.
+- **Fall back to the draft on any failure** (empty reply, over the word limit, timeout),
+  recorded in metadata; never fail the sample. (PR #2 raised errors here.)
+- **Budget:** reserve a share of the token budget (or of the time, on time budgets), and
+  count the writer's tokens, as with readers. Expected: about 15–25k input tokens and
+  5–8k output tokens including reasoning.
+- **Model:** the agent's own model by default (a `writer` model role can override it), so
+  the writer adds no stronger reasoning.
+- **The report stays where it is.** The final report replaces `/work/report.md`; the draft
+  is kept beside it, and both are recorded in metadata.
+
+**Option and levels (one task option, e.g. `-T writer=W1|W2|W3`):**
+- **W1:** draft + gap check output (works for atlas-only arms).
+- **W2:** W1 + unused reader notes (crew arms).
+- **W3:** W2 + record excerpts + the corpus map.
+
+**Evaluation.** Each level against the same arm without the writer, as paired arms run at
+the same time, 3 or more runs each. Measure:
+- the four scores;
+- findings in the final report that were not in the draft (gains), and findings in the
+  draft that the final report lost (losses);
+- Fix items in the final report against the draft (errors introduced);
+- the writer's token and time cost, and the investigation time or tokens given up for
+  the reserve.
+
+**If PR #2 is revisited:** the agent-written ledger can be tried as an extra writer input on
+top of W1–W3. Its unverified excerpts would need the same checking as reader notes.

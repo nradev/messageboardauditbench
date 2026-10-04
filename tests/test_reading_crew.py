@@ -226,7 +226,7 @@ def test_crew_option_needs_atlas_and_adds_its_prompt():
     with pytest.raises(ValueError):
         parse_tools("crew")
     s = _german_wiki_report(agent="react", tools="atlas,crew", time_limit_minutes=10).dataset[0]
-    assert "crew brief" in s.input and s.id.endswith("+atlas+crew")
+    assert "crew_brief" in s.input and s.id.endswith("+atlas+crew")
 
 
 def test_verify_drops_a_quote_held_by_several_records_when_the_cited_one_lacks_it():
@@ -433,8 +433,8 @@ def test_background_sweep_is_delivered_once_through_the_continue_hook(monkeypatc
         crew = rc.Crew(model=FakeModel(delay=0.05))
         rc.start_background_sweep(crew)
         hook = combined_continue(None, None, {}, crew=crew)
-        tool = rc.crew_tool(crew)
-        busy = await tool(action="sweep")
+        tool = rc.crew_tools(crew)[2]  # crew_sweep
+        busy = await tool()
         first = await hook(tools_turn)  # still reading
         await crew.background
         second = await hook(tools_turn)
@@ -444,19 +444,23 @@ def test_background_sweep_is_delivered_once_through_the_continue_hook(monkeypatc
     crew, busy, first, second, third = asyncio.run(scenario())
     assert "still reading" in busy
     assert first is True and third is True
-    assert second.startswith("Background reading finished") and "crew sweep: " in second
+    assert second.startswith("Background reading finished") and "crew_sweep: " in second
     assert crew.background_record["delivered_epoch"] >= crew.background_record["started_epoch"]
     assert crew.stats.tool_calls[0]["background"] is True
 
 
-def test_tool_needs_a_target_except_for_sweep_and_option_validation():
+def test_crew_tools_require_their_arguments_in_the_schema_and_option_validation():
+    from inspect_ai.tool._tool_def import ToolDef
+
     from messageboard_audit_bench.task import _german_wiki_report
 
-    tool = rc.crew_tool(rc.Crew(model=object()))
-    assert "give a target set" in asyncio.run(tool(action="brief"))
-    assert "unknown action" in asyncio.run(tool(action="nope", target="t1"))
+    defs = {ToolDef(t).name: ToolDef(t).parameters for t in rc.crew_tools(rc.Crew(model=object()))}
+    assert set(defs) == {"crew_brief", "crew_ask", "crew_sweep", "crew_notes"}
+    assert defs["crew_brief"].required == ["target"]
+    assert sorted(defs["crew_ask"].required) == ["question", "target"]
+    assert defs["crew_sweep"].required == [] and defs["crew_notes"].required == []
     s = _german_wiki_report(agent="react", tools="atlas,crew", sweep_at_start=True, time_limit_minutes=10).dataset[0]
-    assert s.metadata["sweep_at_start"] is True and "crew sweep" in s.input
+    assert s.metadata["sweep_at_start"] is True and "crew_sweep" in s.input
     with pytest.raises(ValueError):
         _german_wiki_report(agent="react", tools="atlas", sweep_at_start=True)
 
@@ -470,16 +474,16 @@ def test_continue_messages_name_the_arms_tools_and_baseline_is_unchanged():
 
     assert continue_hint(()) == ""
     hint = continue_hint(("atlas", "crew"))
-    assert "widen the investigation" in hint and "crew sweep" in hint and "atlas unseen" in hint
+    assert "widen the investigation" in hint and "crew_sweep" in hint and "atlas unseen" in hint
     assert "crew" not in continue_hint(("atlas",))
     base = _minimum_runtime_continuation(elapsed_seconds=100, minimum_runtime_seconds=450, remaining_seconds=500)
     assert "widen" not in base
     with_tools = _minimum_runtime_continuation(elapsed_seconds=100, minimum_runtime_seconds=450,
                                                remaining_seconds=500, hint=hint)
-    assert "crew sweep" in with_tools and with_tools.endswith(base[base.index("Keep report.md"):])
+    assert "crew_sweep" in with_tools and with_tools.endswith(base[base.index("Keep report.md"):])
     no_tools_turn = SimpleNamespace(output=SimpleNamespace(message=SimpleNamespace(tool_calls=[])))
     msg = asyncio.run(policy_aware_continue(1000, clock=lambda: 900, hint=hint)(no_tools_turn))
-    assert msg.startswith("About 100 seconds remain") and "crew sweep" in msg
+    assert msg.startswith("About 100 seconds remain") and "crew_sweep" in msg
 
 
 def test_every_verified_note_is_kept_and_listed_by_crew_notes(monkeypatch, saved_notes):
@@ -492,7 +496,7 @@ def test_every_verified_note_is_kept_and_listed_by_crew_notes(monkeypatch, saved
     out = asyncio.run(rc.brief(crew, "t1", []))
     assert len(crew.notes) == 30 and saved_notes == crew.notes  # all verified notes kept, invented ones not
     assert sum(n["shown"] for n in crew.notes) == 1  # same-kind notes merged in the output; one shown
-    assert "29 more verified notes from this call are kept: crew notes" in out
+    assert "29 more verified notes from this call are kept: crew_notes" in out
     assert all(n["key"].startswith(n["ref"] + "|") for n in crew.notes)
     again = asyncio.run(rc.brief(crew, "t1", []))  # the same notes are not stored twice
     assert len(crew.notes) == 30 and "more verified notes" not in again
@@ -502,8 +506,8 @@ def test_every_verified_note_is_kept_and_listed_by_crew_notes(monkeypatch, saved
         asked.append(pattern)
         return "reader notes: listed by atlas"
 
-    monkeypatch.setattr(rc, "list_notes", fake_list)  # `crew notes` delegates to `atlas notes`
-    assert asyncio.run(rc.crew_tool(crew)(action="notes", target="relay")) == "reader notes: listed by atlas"
+    monkeypatch.setattr(rc, "list_notes", fake_list)  # `crew_notes` delegates to `atlas notes`
+    assert asyncio.run(rc.crew_tools(crew)[3](pattern="relay")) == "reader notes: listed by atlas"
     assert asked == ["relay"]
 
 

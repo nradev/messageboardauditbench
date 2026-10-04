@@ -485,7 +485,7 @@ def _valid_summary(items, refs: set[str]) -> list[dict]:
 
 def _header(action: str, spec: str, data: dict, records: list, chunks: list, read_ok: int, skipped: int,
             secs: int, extra: str = "") -> list[str]:
-    label = f"crew {action}" if spec == action else f"crew {action} {spec}"
+    label = f"crew_{action}" if spec == action else f"crew_{action} {spec}"
     head = (f"{label}: {data.get('description', spec)}; {data['rows']:,} rows, "
             f"{data['distinct']:,} distinct, {len(records)} read by {read_ok} of {len(chunks)} readers in {secs}s")
     if read_ok < len(chunks):
@@ -501,12 +501,12 @@ def _header(action: str, spec: str, data: dict, records: list, chunks: list, rea
 async def _load(crew: Crew, action: str, spec: str, where: list[str], limit: int) -> tuple[dict | None, str | None]:
     reason = crew.budget_left()
     if reason:
-        return None, f"crew {action}: not run, {reason}."
+        return None, f"crew_{action}: not run, {reason}."
     data = await fetch_records(spec, where, replace(crew.limits, set_records=limit))
     if "error" in data:
-        return None, f"crew {action}: {data['error']}"
+        return None, f"crew_{action}: {data['error']}"
     if not data["records"]:
-        return None, f"crew {action} {spec}: the set is empty ({data.get('description', '')})."
+        return None, f"crew_{action} {spec}: the set is empty ({data.get('description', '')})."
     return data, None
 
 
@@ -574,8 +574,8 @@ async def _read_and_render(crew: Crew, action: str, spec: str, data: dict, start
     await save_notes(new)
     unseen_notes = sum(1 for n in new if not n["shown"])
     if unseen_notes:
-        out.append(f"\n{unseen_notes} more verified notes from this call are kept: crew notes (optionally with "
-                   "a regex as target) lists them.")
+        out.append(f"\n{unseen_notes} more verified notes from this call are kept: crew_notes (optionally with "
+                   "a regex) lists them.")
     dropped = crew.stats.notes_dropped
     out.append(f"\nEvery note's quote was checked against its record (notes that failed are left out; "
                f"{dropped} so far this run). Readers can miss things and see only "
@@ -602,9 +602,9 @@ async def sweep(crew: Crew, background: bool = False) -> str:
 
 
 SWEEP_FRAMING = (
-    "Background reading finished (crew sweep, started at the beginning of your run): readers "
+    "Background reading finished (crew_sweep, started at the beginning of your run): readers "
     "read a cross-section of the corpus for you. These are leads, not findings: confirm what "
-    "you use with atlas show, and follow up with crew brief / crew ask or atlas. Continue your "
+    "you use with atlas show, and follow up with crew_brief / crew_ask or atlas. Continue your "
     "work.\n\n"
 )
 
@@ -641,7 +641,7 @@ async def ask(crew: Crew, spec: str, question: str, where: list[str]) -> str:
     it says and a checked quote; a reduce call answers the question from that evidence."""
     started = time.monotonic()
     if not question.strip():
-        return "crew ask: give a question, e.g. question=\"who first used the proxy, and how?\""
+        return "crew_ask: give a question, e.g. question=\"who first used the proxy, and how?\""
     data, problem = await _load(crew, "ask", spec, where, crew.limits.ask_records)
     if problem:
         return problem
@@ -691,7 +691,7 @@ async def ask(crew: Crew, spec: str, question: str, where: list[str]) -> str:
         rest = [a["ref"] for a in answers[crew.limits.ask_evidence :]]
         if rest:
             out.append(f"Also relevant ({len(rest)}): " + ", ".join(rest[:40]) + (" …" if len(rest) > 40 else "")
-                       + "  (crew ask with refs:… or atlas show to read them)")
+                       + "  (crew_ask with refs:… or atlas show to read them)")
     out.append(f"\nEvery quote was checked against its record (answers that failed are left out; "
                f"{crew.stats.notes_dropped} so far this run). Readers can miss things: confirm what you "
                "rely on with atlas show REF. Records read here count as read for atlas unseen.")
@@ -705,7 +705,7 @@ async def ask(crew: Crew, spec: str, question: str, where: list[str]) -> str:
 
 
 async def list_notes(pattern: str) -> str:
-    """`crew notes`: atlas lists the kept notes (ranked, not shown before first) in the
+    """`crew_notes`: atlas lists the kept notes (ranked, not shown before first) in the
     sandbox, where it also tracks which notes the agent has seen."""
     result = await sandbox().exec([ATLAS_BIN, "notes", *([pattern] if pattern else [])], timeout=120)
     return (result.stdout if result.success else f"{result.stdout}\n{result.stderr}").strip() or "(no output)"
@@ -714,63 +714,90 @@ async def list_notes(pattern: str) -> str:
 # ---------- the tool ----------
 
 
-def crew_tool(crew: Crew) -> Tool:
-    @tool(name="crew")
-    def _crew() -> Tool:
-        async def execute(action: str, target: str | None = None, question: str | None = None,
-                          where: list[str] | None = None) -> str:
-            """Reading crew: parallel readers read a set of records for you and return
-            short notes, each with the record ref and an exact quote (checked against the
-            record). Use it to read more of the corpus than you can yourself, in depth: a
-            whole theme or cluster, every hit of a pattern, the rows around an event.
+def crew_tools(crew: Crew) -> list[Tool]:
+    """The reading crew as four tools, one per action, so each required argument is required
+    by the tool schema itself (an optional `target` shared with sweep was often left out)."""
 
-            Actions:
-              brief    who, what, how, when, claims, outcomes, unexpected details and open
-                       questions in the set, plus a short summary with citations
-              ask      a question about the set: readers keep the records that bear on it,
-                       each with what it says and a quote, and answer from that evidence
-                       (also says how many records were relevant; up to 120 records read)
-              notes    every verified note the readers produced this run (each call shows only
-                       some); target = optional regex filter; notes not shown before first
-              sweep    no target needed: readers read a cross-section of the whole corpus
-                       you have not read yet (theme examples, the most unusual records, the
-                       most repeated ones) and return a digest of leads; calling it again
-                       moves on to the next unread records (about 150 per call)
+    @tool(name="crew_brief")
+    def _brief() -> Tool:
+        async def execute(target: str, where: list[str] | None = None) -> str:
+            """Reading crew brief: parallel readers read a set of records for you (about 60
+            distinct records; near-duplicates read once) and return who, what, how, when,
+            claims, outcomes, unexpected details and open questions, plus a short summary,
+            each note with the record ref and an exact quote checked against the record.
 
             Sets (same ids as atlas): tNN theme, cNN cluster, wNN window; grep:REGEX (rows
             matching anywhere); pivot:VALUE (rows containing VALUE); rows:TABLE with
             `where` filters (FIELD=V, FIELD~REGEX, FIELD>=V ...); around:REF (rows next to
-            one record in time); refs:REF,REF,... (exactly these rows). Large sets are
-            sampled (brief about 60 distinct records, ask about 120: the most repeated,
-            the most unusual, the rest spread over time); near-duplicates are read once.
+            one record in time); refs:REF,REF,... (exactly these rows).
 
-            A call spends a piece of your time budget — seconds to a couple of minutes,
-            depending on the set and load. Readers see only the records given to them and
-            can miss things: confirm what you rely on with atlas show.
+            A call takes seconds to a couple of minutes and the readers' tokens count toward
+            your budget. Readers see only the records given to them and can miss things:
+            confirm what you rely on with atlas show.
 
             Args:
-                action: "brief", "ask", "sweep" or "notes".
-                target: The set to read (not needed for sweep), e.g. "t3", "c120", "grep:timeout|retry",
+                target: The set to read, e.g. "t3", "c120", "grep:timeout|retry",
                     "rows:events", "around:events:120".
-                question: For ask: the question, e.g. "Which hosts did they route requests
-                    through, and did any work?".
                 where: Filters for a rows:TABLE target, e.g. ["event_type=delete"].
             """
-            if action == "sweep":
-                if crew.background is not None and not crew.background.done():
-                    return ("A sweep started at the beginning of your run is still reading; its digest "
-                            "will arrive automatically. Use crew brief / crew ask meanwhile.")
-                return await sweep(crew)
-            if action == "notes":
-                return await list_notes((target or "").strip())
-            if not (target or "").strip():
-                return f"crew {action}: give a target set, e.g. target=\"t3\" or \"grep:timeout\""
-            if action == "brief":
-                return await brief(crew, target.strip(), list(where or []))
-            if action == "ask":
-                return await ask(crew, target.strip(), question or "", list(where or []))
-            return f"unknown action {action!r}; use \"brief\", \"ask\", \"sweep\" or \"notes\""
+            return await brief(crew, target.strip(), list(where or []))
 
         return execute
 
-    return _crew()
+    @tool(name="crew_ask")
+    def _ask() -> Tool:
+        async def execute(target: str, question: str, where: list[str] | None = None) -> str:
+            """Reading crew question: readers check every record in a set (up to about 120;
+            the most repeated, the most unusual, the rest spread over time) against your
+            question, keep the records that bear on it, each with what it says and a quote,
+            and answer from that evidence, including how many records were relevant (so it
+            also shows whether something never happens).
+
+            Sets (same ids as atlas): tNN theme, cNN cluster, wNN window; grep:REGEX (rows
+            matching anywhere); pivot:VALUE (rows containing VALUE); rows:TABLE with
+            `where` filters (FIELD=V, FIELD~REGEX, FIELD>=V ...); around:REF (rows next to
+            one record in time); refs:REF,REF,... (exactly these rows).
+
+            A call takes seconds to a couple of minutes and the readers' tokens count toward
+            your budget. Readers can miss things: confirm what you rely on with atlas show.
+
+            Args:
+                target: The set to check, e.g. "grep:proxy|relay", "rows:events", "t3".
+                question: The question, e.g. "Which hosts did they route requests through,
+                    and did any work?".
+                where: Filters for a rows:TABLE target, e.g. ["event_type=delete"].
+            """
+            return await ask(crew, target.strip(), question, list(where or []))
+
+        return execute
+
+    @tool(name="crew_sweep")
+    def _sweep() -> Tool:
+        async def execute() -> str:
+            """Reading crew sweep: readers read a cross-section of the whole corpus you have
+            not read yet (theme examples, the most unusual records, the most repeated ones;
+            about 150 records) and return a digest of leads with refs and checked quotes.
+            Calling it again moves on to the next unread records. The readers' tokens count
+            toward your budget.
+            """
+            if crew.background is not None and not crew.background.done():
+                return ("A sweep started at the beginning of your run is still reading; its digest "
+                        "will arrive automatically. Use crew_brief / crew_ask meanwhile.")
+            return await sweep(crew)
+
+        return execute
+
+    @tool(name="crew_notes")
+    def _notes() -> Tool:
+        async def execute(pattern: str | None = None) -> str:
+            """Every verified note the reading crew produced this run (each crew call shows
+            only some), notes not shown before first, records salient and unread first.
+
+            Args:
+                pattern: Optional regex to filter the notes, e.g. "proxy|relay".
+            """
+            return await list_notes((pattern or "").strip())
+
+        return execute
+
+    return [_brief(), _ask(), _sweep(), _notes()]

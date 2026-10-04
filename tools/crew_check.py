@@ -1,6 +1,6 @@
 """Check the reading crew's reader output on a local corpus, outside an eval (small cost).
 
-Runs `crew brief` (or `crew ask` with --ask "question") on each given set with a real model and prints the output and the reader
+Runs `crew_brief` (or `crew_ask` with --ask "question") on each given set with a real model and prints the output and the reader
 stats: how many notes came back, how many quotes verified, latency, tokens. Records come
 from the local atlas, exactly as `atlas records` gives them in the sandbox.
 
@@ -35,7 +35,7 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--provider", help="pin an OpenRouter provider, no fallbacks")
     ap.add_argument("--where", action="append", default=[])
-    ap.add_argument("--ask", help="run `crew ask` with this question instead of `crew brief`")
+    ap.add_argument("--ask", help="run `crew_ask` with this question instead of `crew_brief`")
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
     model_args = {"provider": {"order": [args.provider], "allow_fallbacks": False}} if args.provider else {}

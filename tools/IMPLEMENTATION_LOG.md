@@ -1656,3 +1656,28 @@ post-merge runs are compared with post-merge reference arms) and in concurrent g
   turn and stop still worked.
 - Full suite apart from the 2 pre-existing `node` failures; ruff clean.
 - `tools/atlas/README.md` updated.
+
+## Step 24: the crew as four tools with required arguments
+
+**Why.** In the 200k-token crew runs (`logs/crew-tok200k-v0.3.0`), 24 of 26 and 19 of 19
+`crew ask` calls failed with "give a target set". The agent passed `question`, sometimes
+`where`, but left out `target`. `target` was optional so that `sweep` could go without
+one. PR #1's standard tool schema lists only parameters without defaults as required, so
+nothing in the schema asked for a target. That cost about 43 turns over two runs.
+
+**Change.** `crew_tools(crew)` returns one tool per action. Each tool's required arguments
+have no default, so the schema requires them in either schema mode:
+- `crew_brief(target, where?)`;
+- `crew_ask(target, question, where?)`;
+- `crew_sweep()`;
+- `crew_notes(pattern?)`.
+
+Each docstring describes only its own action. The agent prompt, the continue hint,
+output labels (`crew_sweep: ...`), atlas's `unseen` pointer, the README and RUN.md now use
+the new names. The metadata `crew.tool_calls` keeps its `action` field. A test checks
+each tool's `required` list.
+
+**Not changed: compacting repeated `atlas gapcheck` output.** The token budget counts only
+output tokens (`token_budget.sample_output_tokens`). Tool output is input to later turns,
+so repeated gap checks don't draw on the budget directly. They cost only the agent's short
+tool calls and any reply to them.

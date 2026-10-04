@@ -600,7 +600,7 @@ def _german_wiki_report(
             its output with the "corrections first; Consider items optional" framing. The
             share is of the time budget, or of the output-token budget with
             ``token_budget`` / a token-budget config. Default off.
-        sweep_at_start: With ``tools=atlas,crew``: start a ``crew sweep`` in the background
+        sweep_at_start: With ``tools=atlas,crew``: start a ``crew_sweep`` in the background
             when the agent starts, and hand its digest to the agent (framed as leads to
             confirm) on the first turn after it finishes. Default off.
     """

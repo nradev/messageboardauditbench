@@ -132,5 +132,5 @@ def unseen_section(idx: Index, k: int = 3) -> list[str]:
     out = [f"\nReader notes not shown yet ({len(fresh)} records; top {len(top)}, salient records first):"]
     out += ["  " + line(n, 20) for n in top]
     if len(fresh) > len(top):
-        out.append(f"  {len(fresh) - len(top)} more: crew notes (optionally with a regex).")
+        out.append(f"  {len(fresh) - len(top)} more: crew_notes (optionally with a regex).")
     return out

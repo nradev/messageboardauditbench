@@ -222,7 +222,7 @@ per-finding split, report words and calls per run against the 10-minute pair
 (pilot 5 / baseline 5), and the `gapcheck_auto` metadata (did Fix items go
 away; which Consider items were taken up).
 
-## 8. Reading crew (`crew brief`, `crew ask`, `crew sweep`)
+## 8. Reading crew (`crew_brief`, `crew_ask`, `crew_sweep`, `crew_notes`)
 
 **Reader check (a few cents).** Before any pilot, look at real reader output:
 are notes specific, do quotes verify, how long does a call take. Run it on

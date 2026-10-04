@@ -54,7 +54,7 @@ Used by the reading crew (below), not listed in `--help`:
 |---|---|
 | `records SET [--limit N] [--chars N] [--where ...]` | a set of records as JSON for readers; SET is `tNN`, `cNN`, `wNN`, `grep:REGEX`, `pivot:VALUE`, `rows:TABLE`, `around:REF`, `refs:A,B` or `sweep` |
 | `mark REF ... [--label L]` | log rows as read by crew readers (`unseen` lists them last) |
-| `notes [REGEX] [--n N]` | the kept reader notes, those not shown before first, ranked (the crew's `notes` action) |
+| `notes [REGEX] [--n N]` | the kept reader notes, those not shown before first, ranked (what `crew_notes` calls) |
 
 Every response ends with `→ next:` and the commands worth running next. Options may come
 before or after the command. `--json` gives machine-readable cluster lists (and gapcheck
@@ -142,19 +142,20 @@ Full run commands: `tools/RUN.md`.
 can read only a small part of a corpus within its budget; the crew's readers read
 records in parallel, outside the agent's turns, and return short notes with citations.
 
-- **Actions** (one `crew` tool):
-  - `brief SET`: who, what and how, claims, times, outcomes, anything unexpected and open
+- **Tools** (one per action, so the schema itself requires each tool's arguments; a single
+  `crew` tool with an optional `target` saw most `ask` calls sent without one):
+  - `crew_brief(target)`: who, what and how, claims, times, outcomes, anything unexpected and open
     questions in a set, plus a short cited summary (about 60 distinct records).
-  - `ask SET question=...`: readers keep the records that bear on the question, each with
+  - `crew_ask(target, question)`: readers keep the records that bear on the question, each with
     what it says and a quote; a reduce call answers from that evidence; the output says
     how many records were relevant, so a "no" is scoped to what was read (about 120).
-  - `sweep`: no target; records nobody has read yet (not opened or shown in full by the
+  - `crew_sweep()`: no arguments; records nobody has read yet (not opened or shown in full by the
     agent, not read by readers; a listing line does not count as reading), picked by atlas
     (`records sweep`): salient windows for narrative files, then a few theme examples and
     salient clusters of every size band (rare ≤5 rows, mid-size 6–50, for which the latest
     unread version is read, and the largest), the rest spread over time; each record is
     tagged with why it was picked, and calling again moves on (about 150).
-  - `notes [REGEX]`: every verified note of the run (atlas lists them in the sandbox), those
+  - `crew_notes(pattern?)`: every verified note of the run (atlas lists them in the sandbox), those
     not shown before first.
 - **Sets** are atlas's: `tNN`, `cNN`, `wNN`, `grep:REGEX`, `pivot:VALUE`, `rows:TABLE`
   with `where` filters, `around:REF`, `refs:A,B`. Large sets are sampled (the most
@@ -172,13 +173,13 @@ records in parallel, outside the agent's turns, and return short notes with cita
 - **Caps**: 15 records or 14k characters per reader, 8 readers at once, 60 s per reader
   (one retry for an unusable reply), 90 s per tool call (less near the deadline), 120
   reader calls and 3M tokens per run. Output: at most 4 notes per kind and 20 in total
-  (sweep 5 and 25), quotes up to 25 words; the rest is kept for `crew notes`.
+  (sweep 5 and 25), quotes up to 25 words; the rest is kept for `crew_notes`.
 - **Coverage and notes**: records read are marked in atlas's coverage log (`unseen`
   lists them last). All verified notes go to `/tmp/atlas-notes.jsonl`; atlas tracks which
   ones the agent has seen and ranks the rest (`notes.py`): salience of the note's record,
   then note kind as a mild modifier, records the agent read itself last, and for short
   pushes one note per record with varied wording. `unseen` pushes up to 3 unseen notes;
-  `gapcheck` asks about up to 2 the report does not use; `crew notes` lists them all, and
+  `gapcheck` asks about up to 2 the report does not use; `crew_notes` lists them all, and
   the early-finish nudge of crew runs mentions it.
 - **Metadata**: `crew` holds per-call stats (set, seconds, readers finished, notes),
   reader calls, tokens, latency, timeouts, errors, quotes returned, verified,

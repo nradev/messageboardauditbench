@@ -50,14 +50,14 @@ TOOL_PROMPTS = {
         "your account. Plain shell tools remain available for anything atlas does not cover.\n"
     ),
     "crew": (
-        "\n\nYou also have `crew`, a reading crew. Within your budget you can read only a small "
+        "\n\nYou also have a reading crew (`crew_sweep`, `crew_brief`, `crew_ask`, `crew_notes`). Within your budget you can read only a small "
         "part of the corpus yourself; the crew's readers read 60 to 150 records in parallel "
         "outside your turns — not instantly, but far faster than the dozens of turns reading "
         "them yourself would take. They return short notes, each with a record ref and an exact quote checked against the "
-        "record. Use it whenever reading more would change your account: `crew sweep` early "
+        "record. Use it whenever reading more would change your account: `crew_sweep` early "
         "on, for a cross-section of the corpus beyond what atlas lists (each call moves on to "
-        "records not read yet); `crew brief SET` to understand a theme, cluster or event in "
-        "depth instead of sampling a few records; `crew ask SET` with a question to check every "
+        "records not read yet); `crew_brief` on a set to understand a theme, cluster or event in "
+        "depth instead of sampling a few records; `crew_ask` with a set and a question to check every "
         "record in a set (grep hits, filtered rows, a theme) for the answer, including whether "
         "something never happens. Sets are atlas ids (tNN, cNN, wNN), grep:REGEX, pivot:VALUE, "
         "rows:TABLE with filters, around:REF or refs:A,B. Readers see only the records given to "
@@ -70,8 +70,8 @@ TOOL_PROMPTS = {
 # published wording.
 CONTINUE_HINTS = {
     "atlas": "`atlas unseen` lists salient records you have not looked at",
-    "crew": "`crew sweep` has readers go through records you have not read yet, "
-            "`crew ask SET` checks a whole set against a question, and `crew notes` lists what "
+    "crew": "`crew_sweep` has readers go through records you have not read yet, "
+            "`crew_ask` checks a whole set against a question, and `crew_notes` lists what "
             "readers noted that you have not seen yet",
 }
 
