@@ -40,6 +40,7 @@ View any result with:  inspect view
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -77,6 +78,11 @@ from messageboard_audit_bench.benchmarks import (
 from messageboard_audit_bench.configs import CONFIG_NAME, load_config
 from messageboard_audit_bench.final_writer import LEVELS as WRITER_LEVELS
 from messageboard_audit_bench.final_writer import STRENGTHS as WRITER_STRENGTHS
+from messageboard_audit_bench.final_writer import (
+    parse_variants,
+    variant_name,
+    variant_scorer,
+)
 from messageboard_audit_bench.grading.core import SINGLE_CALL_MODES, variant_for_data
 from messageboard_audit_bench.grading.finding_scorer import finding_scorer
 from messageboard_audit_bench.grading.scorer import sheet_scorer
@@ -118,6 +124,8 @@ _SUPPORTED_AGENTS = {"claude", "codex", "react"}
 _BACKENDS = {"inspect", "subscription"}
 DEFAULT_TIME_LIMIT_MINUTES = 20
 TIMEOUT_GRACE_MINUTES = 5
+VARIANT_SECONDS_ON_TOKENS = 600  # each writer variant's time on a token budget
+VARIANT_SETUP_MINUTES = 3  # installing atlas and preparing the writer's inputs, once
 
 
 def _load_config(config_name: str, benchmark_id: str = "messageboard", allow_drafts: bool = False) -> dict:
@@ -319,6 +327,30 @@ def _scorers(
     ] + scorers
 
 
+def _variant_scorers(
+    judge: str,
+    rubric: str | None,
+    data_variant: str | None,
+    judge_effort: str | None,
+    judge_single_call: bool,
+    variants: tuple[tuple[str, str], ...],
+) -> list:
+    """The benchmark sheets once more for each writer variant's report, named
+    ``<rubric>_<level>-<strength>`` (e.g. ``v2_W3-edit``)."""
+    default_rubric = default_rubrics(data_variant or "verbatim")
+    modes = [mode.strip() for mode in (rubric or default_rubric).split(",") if mode.strip()]
+    out = []
+    for level, strength in variants:
+        name = variant_name(level, strength)
+        for mode in modes:
+            inner = sheet_scorer(
+                rubric=mode, judge=judge, variant=variant_for_data(data_variant), effort=judge_effort,
+                single_call=judge_single_call and mode in SINGLE_CALL_MODES,
+            )
+            out.append(variant_scorer(inner, name, f"{mode}_{name}".replace("-", "_")))
+    return out
+
+
 def _audit_task(
     benchmark_id: str,
     *,
@@ -342,6 +374,7 @@ def _audit_task(
     writer: str | None = None,
     writer_reserve: float = 0.1,
     writer_strength: str = "edit",
+    writer_variants: str | None = None,
 ) -> Task:
     """One fresh sandboxed audit trial of any registered benchmark.
 
@@ -398,6 +431,21 @@ def _audit_task(
     # The final writer's reserve comes out of the trial budget: the agent is given (and told)
     # the rest, so arms with and without a writer spend the same total.
     agent_tokens, agent_min, writer_tokens, writer_seconds = budget_tokens, budget_min, 0, 0
+    variants = parse_variants(writer_variants)
+    if variants:
+        # Variants run outside the agent's budget: the agent keeps all of it, and each variant
+        # gets an allowance of its own (writer_reserve of the budget, in tokens or minutes).
+        if writer is not None:
+            raise ValueError("use writer or writer_variants, not both")
+        if agent != "react" or backend != "inspect":
+            raise ValueError("writer_variants is only supported with agent=react and backend=inspect")
+        if not 0 < float(writer_reserve) < 0.5:
+            raise ValueError("writer_reserve must be a budget share between 0 and 0.5 (e.g. 0.1)")
+        if budget_tokens is not None:
+            writer_tokens = round(budget_tokens * float(writer_reserve))
+            writer_seconds = VARIANT_SECONDS_ON_TOKENS
+        else:
+            writer_seconds = max(1, round(budget_min * float(writer_reserve))) * 60
     if writer is not None:
         if writer not in WRITER_LEVELS:
             raise ValueError(f"writer must be one of {', '.join(WRITER_LEVELS)}")
@@ -422,6 +470,8 @@ def _audit_task(
         else runtime_policy.minimum_runtime_seconds(budget_min * 60, runtime_fraction)
     )
     cleanup_timeout_minutes = budget_min + TIMEOUT_GRACE_MINUTES
+    if variants:  # the variants run after the agent, each within its own time
+        cleanup_timeout_minutes += math.ceil(len(variants) * writer_seconds / 60) + VARIANT_SETUP_MINUTES
     budget_label = f"{budget_tokens}tok" if budget_tokens is not None else f"{budget_min}m"
     identity = (
         {"incident": incident_for_variant(cfg["data_variant"]).id}
@@ -459,6 +509,9 @@ def _audit_task(
         sample_metadata["gapcheck_at"] = float(gapcheck_at)
     if sweep_at_start:
         sample_metadata["sweep_at_start"] = True
+    if variants:
+        sample_metadata["writer_variants"] = [variant_name(*v) for v in variants]
+        sample_metadata["writer_reserve"] = float(writer_reserve)
     if writer is not None:
         sample_metadata["writer"] = writer
         sample_metadata["writer_reserve"] = float(writer_reserve)
@@ -480,7 +533,8 @@ def _audit_task(
         id=f"{agent}:{backend}:{config}:{budget_label}"
         + "".join(f"+{t}" for t in investigation_tools)
         + (f"+writer-{writer}" if writer is not None else "")
-        + (f"-{writer_strength}" if writer is not None and writer_strength != "edit" else ""),
+        + (f"-{writer_strength}" if writer is not None and writer_strength != "edit" else "")
+        + ("+variants-" + "+".join(variant_name(*v) for v in variants) if variants else ""),
         metadata=sample_metadata,
     )
     if backend == "inspect":
@@ -501,6 +555,7 @@ def _audit_task(
             writer_tokens=writer_tokens,
             writer_seconds=writer_seconds,
             writer_strength=writer_strength,
+            writer_variants=variants,
         )
         selected_sandbox = _inspect_sandbox(cfg["data_variant"], benchmark_id, cfg)
         generate_config = GenerateConfig(
@@ -588,6 +643,7 @@ def _german_wiki_report(
     writer: str | None = None,
     writer_reserve: float = 0.1,
     writer_strength: str = "edit",
+    writer_variants: str | None = None,
 ) -> Task:
     """Run one sandboxed German wiki report trial (the collusion.wiki incident).
 
@@ -655,6 +711,12 @@ def _german_wiki_report(
             edits, the default), ``rebalance`` (cut less important material to make room
             for material the draft leaves out) or ``rewrite`` (a fresh report built around
             the most important findings of all inputs).
+        writer_variants: Comma-separated ``LEVEL:STRENGTH`` writer variants, e.g.
+            ``W3:edit,W3:rewrite``. Each runs on the agent's final report after it stops,
+            outside the agent's budget (each with ``writer_reserve`` of the budget as its own
+            allowance), and is graded by the same sheets under its own scorer names
+            (``v2_W3_edit``, ``tldrh_W3_edit``, ...). report.md and the main scores stay the
+            agent's. Replaces ``writer``.
     """
     check_version("messageboard", version)
     # Resolve the data variant first: it selects the default rubric.
@@ -669,7 +731,9 @@ def _german_wiki_report(
         time_limit_minutes=time_limit_minutes,
         min_runtime_fraction=min_runtime_fraction,
         data_variant=data_variant,
-        scorers=_scorers(judge, rubric, variant, judge_effort, judge_single_call),
+        scorers=_scorers(judge, rubric, variant, judge_effort, judge_single_call)
+        + _variant_scorers(judge, rubric, variant, judge_effort, judge_single_call,
+                           parse_variants(writer_variants)),
         tools=tools,
         policy_aware_continue=policy_aware_continue,
         gapcheck_at=gapcheck_at,
@@ -678,6 +742,7 @@ def _german_wiki_report(
         writer=writer,
         writer_reserve=writer_reserve,
         writer_strength=writer_strength,
+        writer_variants=writer_variants,
     )
 
 

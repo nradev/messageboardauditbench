@@ -130,7 +130,8 @@ Related task options (all off by default, so default runs are the published cond
 | `-T gapcheck_at=0.6` | runs `atlas gapcheck` on the draft once, on the first turn after that share of the budget (time, or output tokens with `-T token_budget` / the `blind-tokens` config), and sends its output with the "corrections first; Consider items optional" framing; outcome in `gapcheck_auto` (`at_share`, `share_of`) |
 | `-T sweep_at_start=true` | (needs `crew`) starts a crew sweep when the agent starts and hands its digest over on the first turn after it finishes; timing in `crew_sweep_at_start` |
 | `-T writer=W1\|W2\|W3` | the final writer (below) rewrites report.md after the agent stops; works with any arm (atlas is installed for the writer alone if the agent had no tools) |
-| `-T writer_reserve=0.1` | the writer's share of the budget (tokens, or minutes on a time budget); the agent is given and told the rest |
+| `-T writer_reserve=0.1` | the writer's share of the budget (tokens, or minutes on a time budget); the agent is given and told the rest. With `writer_variants`, each variant's own allowance instead, outside the agent's budget |
+| `-T writer_variants=W3:edit,W3:rewrite` | runs several writer variants on the agent's final report after it stops, outside its budget, and grades each with the same sheets under its own scorer names (`v2_W3_edit`, `tldrh_W3_edit`, ...); report.md and the main scores stay the agent's. Replaces `writer` |
 
 ```sh
 uv run inspect eval messageboard_audit_bench/german_wiki_report \
@@ -237,6 +238,19 @@ investigate: it may cite only refs that appear in its inputs.
   of what is left, so a repair always has room. On a time budget it gets the reserved
   minutes, at least 2.
 - **Model**: the `writer` model role if given, else the agent's model.
+- **Variants** (`-T writer_variants=LEVEL:STRENGTH,...`): one agent run, several writers.
+  - The agent keeps its whole budget and its report stays `report.md` and the main
+    scores, so it is the no-writer condition.
+  - Each variant then runs on that report with its own allowance (`writer_reserve` of the
+    budget: 20k tokens at 200k, or the same share of the minutes; 10 minutes each on a
+    token budget). Variants share the atlas install and each level's inputs.
+  - Each variant is graded under `<rubric>_<variant>` scorers. A variant that kept the
+    draft is graded on the draft.
+  - `writer_variants` metadata holds each variant's report and writer metadata. The token
+    budget metadata is the agent's own usage, frozen before the variants run.
+  - The comparison is paired, so agent run-to-run noise drops out.
+  - `tools/writer_variants_metrics.py` prints the four metrics per variant, and per
+    finding the gains and losses against the draft of the same sample.
 - **Offline check**: `tools/writer_check.py` runs the writer on a finished sample's
   report against the local corpus, with the reader notes from the sample's `crew_notes`.
 

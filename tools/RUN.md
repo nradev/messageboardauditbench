@@ -354,6 +354,28 @@ uv run inspect eval messageboard_audit_bench/german_wiki_report \
 done; wait
 ```
 
+**Variants in one run (cheaper).** One agent run per sample, several writers
+graded side by side. The agent keeps its whole 200k, so the main scores are the
+no-writer condition. Each variant gets its own 20k on top (`writer_reserve`
+sets the size).
+
+```sh
+uv run inspect eval messageboard_audit_bench/german_wiki_report \
+  -T agent=react -T config=blind-tokens -T token_budget=200000 \
+  -T tools=atlas -T gapcheck_at=0.6 \
+  -T writer_variants=W3:edit,W3:rebalance,W3:rewrite \
+  --model openrouter/z-ai/glm-5.3 --model-role grader=openai/gpt-6.1-sol \
+  -M provider='{"order": ["wafer"], "allow_fallbacks": false}' \
+  --epochs 3 --max-samples 3 \
+  --no-fail-on-error --score-on-error \
+  --log-dir logs/atlas-tok200k-variants
+
+uv run python tools/writer_variants_metrics.py logs/atlas-tok200k-variants
+```
+
+Grading cost grows with each variant (one more findings and TL;DR grading per
+sample).
+
 For crew arms, use W2 or W3 with `-T tools=atlas,crew -T sweep_at_start=true`.
 `-T writer_strength=rebalance` or `rewrite` lets the writer depart further from
 the draft (default `edit`); `tools/writer_check.py --strength` tries them offline.

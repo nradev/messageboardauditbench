@@ -105,6 +105,29 @@ SYSTEM = (
 )
 
 
+def parse_variants(value: str | list | tuple | None) -> tuple[tuple[str, str], ...]:
+    """``"W3:edit,W3:rewrite"`` (or a list, as Inspect's CLI passes it) -> ((level, strength), ...).
+    A bare level means ``edit``."""
+    parts = value if isinstance(value, (list, tuple)) else (value or "").split(",")
+    out = []
+    for p in (str(x).strip() for x in parts):
+        if not p:
+            continue
+        level, _, strength = p.partition(":")
+        strength = strength or "edit"
+        if level not in LEVELS or strength not in STRENGTHS:
+            raise ValueError(f"writer variant {p!r}: use LEVEL:STRENGTH with LEVEL in {', '.join(LEVELS)} and "
+                             f"STRENGTH in {', '.join(STRENGTHS)}")
+        out.append((level, strength))
+    if len(set(out)) != len(out):
+        raise ValueError("writer variants must be distinct")
+    return tuple(out)
+
+
+def variant_name(level: str, strength: str) -> str:
+    return f"{level}-{strength}"
+
+
 @dataclass
 class WriterResult:
     report: str | None  # the final report, or None to keep the draft
@@ -271,9 +294,13 @@ def system_prompt(strength: str) -> str:
 
 
 async def run_writer(level: str, task_prompt: str, draft: str, *, min_words: int, max_words: int,
-                     tokens_left, deadline: float, install: bool, strength: str = "edit") -> WriterResult:
+                     tokens_left, deadline: float, install: bool, strength: str = "edit",
+                     cache: dict | None = None) -> WriterResult:
     """Rewrite ``draft``. ``tokens_left()`` is the output-token allowance left for the writer
-    (None on a time budget); ``deadline`` is a ``time.monotonic()`` value."""
+    (None on a time budget); ``deadline`` is a ``time.monotonic()`` value. ``cache``, shared
+    by several writer runs on the same draft, keeps the atlas install and each level's
+    inputs so they are prepared once."""
+    cache = {} if cache is None else cache
     started = time.monotonic()
     meta: dict = {"level": level, "strength": strength, "draft_words": count_words(draft), "calls": 0,
                   "output_tokens": 0, "input_tokens": 0}
@@ -285,10 +312,12 @@ async def run_writer(level: str, task_prompt: str, draft: str, *, min_words: int
     if not draft.strip():
         return finish(None, "skipped", reason="no draft report")
     try:
-        if install:
+        if install and not cache.get("installed"):
             await install_atlas()
+            cache["installed"] = True
         await _write(DRAFT_PATH, draft)
-        pack = await _atlas_json(["writer", "pack", DRAFT_PATH, "--level", level])
+        pack = cache.get(level) or await _atlas_json(["writer", "pack", DRAFT_PATH, "--level", level])
+        cache[level] = pack
         meta.update(draft_fix=pack.get("fix"), draft_consider=pack.get("consider"),
                     notes_given=len(pack.get("notes") or []), notes=pack.get("notes") or [], cited_given=len(pack.get("cited") or []),
                     opened_given=len(pack.get("opened") or []))
@@ -377,3 +406,34 @@ async def run_writer(level: str, task_prompt: str, draft: str, *, min_words: int
         return finish(report, "replaced", final_words=count_words(report), final_fix=check.get("fix"))
     except Exception as e:  # never fail the sample: keep the draft
         return finish(None, "error", reason=f"{type(e).__name__}: {e}"[:500])
+
+
+# ---------- grading the variants ----------
+
+
+def variant_scorer(inner, variant: str, name: str):
+    """Score writer variant ``variant``'s report (from ``writer_variants`` metadata) with the
+    ``inner`` scorer, as if it were the sample's output. Samples without the variant (the
+    agent refused, or the run failed before the writer) are unscored."""
+    import copy
+
+    from inspect_ai.model import ModelOutput
+    from inspect_ai.scorer import Score, mean, scorer, stderr
+
+    @scorer(metrics=[mean(), stderr()], name=name)
+    def _variant():
+        async def score(state, target):
+            entry = (state.metadata.get("writer_variants") or {}).get(variant)
+            if not entry or entry.get("report") is None:
+                return Score.unscored(reason=f"no writer variant {variant}", answer="ungraded")
+            view = copy.copy(state)
+            view.output = ModelOutput.from_content(model="writer", content=entry["report"])
+            result = await inner(view, target)
+            if result is not None:
+                result.metadata = {**(result.metadata or {}), "writer_variant": variant,
+                                   "replaced": entry.get("replaced")}
+            return result
+
+        return score
+
+    return _variant()

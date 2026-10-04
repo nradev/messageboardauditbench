@@ -1820,3 +1820,143 @@ was 2,993 words with 0 Fix items):
 | rewrite | 2 (1 trim) | 7.7k | replaced | 2,950 |
 
 The first replies were 3,054–3,173 words, so a trim of 5–9 units brought each under the limit.
+
+## Step 27: writer variants graded in one run, outside the agent's budget
+
+**Why.** The paired evaluation needed an agent run per arm and writer variant. Agent
+run-to-run noise (e.g. 0.561 against 0.494 on the same arm) dwarfs the writer's
+effect on one draft (±0.03 offline).
+
+**How it works:**
+- **Option.** `-T writer_variants=W3:edit,W3:rewrite` (`final_writer.parse_variants`; a bare
+  level means `edit`; replaces `writer`).
+- **The agent keeps its whole budget**, as the user asked: the writers are separate from it.
+  Its report stays `report.md` and `state.output`, so the main `sheet_scorer` scores are
+  the no-writer condition, at the same budget as earlier runs.
+- **After the agent stops**, the solver runs each variant on that report, one after another:
+  - Each variant has its own allowance: `writer_reserve` of the budget in output tokens
+    (20k at 200k), counted from a snapshot of sample usage, and 10 minutes on a token budget
+    or the reserve share of the minutes on a time budget.
+  - A shared cache prepares the atlas install and each level's `writer pack` once.
+- **Metadata:**
+  - `writer_variants` holds per variant the writer metadata, `replaced`, and the report
+    graded; a variant that kept the draft is graded on the draft;
+  - `writer_variant_allowance`;
+  - the token-budget metadata is frozen before the variants run, so `budget_tokens_used`
+    is the agent's own usage. The overall usage fields (`output_tokens` and the like)
+    include the writers.
+- **Scoring.** `final_writer.variant_scorer` wraps an existing sheet scorer. It grades a
+  shallow copy of the state whose output is the variant's report, under the name
+  `<rubric>_<level>_<strength>`, for example `v2_W3_edit` and `tldrh_W3_edit`. The sample's
+  own state isn't touched, and a missing variant is unscored ("ungraded").
+  `_variant_scorers` builds them for the task's rubrics with the same judge settings.
+- **Task time limit.** The time limit grows by the variants' time plus 3 minutes for setup.
+- **Metrics.** `tools/writer_variants_metrics.py` prints the four metrics per sample and
+  variant, the means per variant, and per finding how often each variant gained or lost
+  credit against its own draft.
+
+**Tests:**
+- variant parsing;
+- the scorer wrapper (grades the variant's report, leaves the output untouched, unscored
+  when the variant is missing);
+- the task: full budget in the prompt, scorer names, time limit, exclusive with `writer`;
+- the solver: each variant gets its own allowance, one cache is shared, kept-draft variants
+  carry the draft, `report.md` stays the agent's, and the budget metadata excludes the
+  writers.
+
+A mock Inspect eval confirmed that the variant scores land in the log under their names.
+
+**Unchanged:** the single `writer` option still takes its reserve out of the agent's budget
+and replaces `report.md`.
+
+## 200k crew run v0.4.2 (crew split, writer variants) against the earlier 200k arms
+
+The run, `logs/crew-tok200k-v0.4.2`, used atlas v0.4.2:
+- 200k output tokens, `tools=atlas,crew`, `gapcheck_at=0.6`, `sweep_at_start=true`;
+- `writer_variants=W3:edit,W3:rebalance,W3:rewrite`;
+- 2 runs, GLM 5.3 via wafer, judge gpt-6.1-sol.
+
+The main scores are the agent's own report at the full 200k (the writers run outside the
+budget), so they compare directly with the earlier 200k arms.
+
+**Four metrics** (means of 2 runs; full / partial / zero are totals over both runs):
+
+| Arm | Raw | Coverage | TL;DR | Combined | Full / partial / zero |
+|---|---|---|---|---|---|
+| baseline | 0.563 | 0.432 | 0.75 | 0.528 | 28 / 29 / 19 |
+| atlas (v0.3.0) | 0.632 | 0.513 | 0.70 | 0.570 | 33 / 29 / 14 |
+| crew v0.3.0 (superseded) | 0.612 | 0.455 | 0.55 | 0.484 | 29 / 33 / 14 |
+| crew v0.4.2 | 0.589 | 0.461 | 0.55 | 0.487 | 29 / 30 / 17 |
+
+Per run, crew v0.4.2 scored 0.561 / 0.405 / 0.50 / 0.434 and 0.618 / 0.516 / 0.60 / 0.541.
+
+**1. The crew split worked; the agent barely uses the crew.**
+- No crew call failed, against 43 of 45 `ask` calls in the superseded run.
+- The agent made only 4 and 6 crew calls (2–3 `crew_ask`, 1–2 `crew_sweep`, 2 `crew_notes`
+  in one run), plus the background sweep at the start.
+
+**2. The readers took almost half the budget.** Readers count toward the 200k by design.
+
+| Run | Total output | Readers | Agent's own |
+|---|---|---|---|
+| crew v0.4.2, run 1 | 166k | 88k | 79k |
+| crew v0.4.2, run 2 | 169k | 71k | 98k |
+| crew v0.3.0 (superseded) | 173k / 156k | 44k / 67k | 130k / 89k |
+| atlas | 151k / 161k | none | 151k / 161k |
+| baseline | 174k / 191k | none | 174k / 191k |
+
+- The agent stops soon after the shared 150k minimum is reached. So the crew agent did
+  roughly half the investigating and writing of the atlas agent.
+- The readers kept 671 and 523 verified notes; the agent saw 87 and 73.
+- Under "readers count toward the budget", the crew is not yet worth its tokens: it reads
+  much that never reaches the report.
+
+**3. Finding by finding** (per-finding means, baseline / atlas / crew; 2 runs each, noisy):
+- **Crew higher:**
+  - the bypass (N22): 0.40 / 0.75 / 0.95;
+  - the seeded shuffle (N29): 0.75 / 0 / 0.50, found fully in one crew run.
+- **Crew lower:**
+  - the Azure IPs (N08): 1.0 / 1.0 / 0.5;
+  - the ZZZ backup page (N16): 0.65 / 0.60 / 0.
+- **Tools against the baseline:** N23, N26 and N27 are 1.0 in both tool arms and 0.35–0.50
+  in the baseline.
+- The coverage gap to atlas (0.461 against 0.513) fits the smaller agent share. The
+  largest part of the combined difference is the TL;DR (0.55 against 0.70), the noisiest
+  metric.
+
+**4. The writer variants on crew drafts.** The comparison is paired on the same drafts.
+Each variant got 30 unused reader notes, 40 cited excerpts and 20 opened excerpts.
+
+| Variant | Raw | Coverage | TL;DR | Combined |
+|---|---|---|---|---|
+| draft | 0.589 | 0.461 | 0.55 | 0.487 |
+| W3 edit | 0.570 | 0.429 | 0.60 | 0.480 |
+| W3 rebalance | 0.591 | 0.445 | 0.60 | 0.491 |
+| W3 rewrite | 0.592 | 0.450 | 0.55 | 0.480 |
+
+- All 6 variant runs replaced their draft, with 1–2 calls, 6–8k output tokens and 50–72 s
+  each. None needed a content repair; 4 needed one trim.
+- Per finding, gains and losses roughly cancel. For example, `rebalance` gained N10 twice
+  and N03, N04, N05, N16, N22, N24 and N33 once each, but lost N26 twice and N04, N06, N08,
+  N11 and N22 once each.
+- Coverage fell by 0.01–0.03 under every strength.
+- **Across three drafts** (the offline atlas draft in step 26 and these two crew drafts),
+  the writer with the agent's own model is net zero:
+  - the TL;DR rises by a step in about half the cases, and coverage dips slightly;
+  - even with unused reader notes in hand, it doesn't turn them into findings;
+  - making room for some findings drops others.
+
+**Conclusions:**
+1. **Writer:** a negative result with the agent's own model. The remaining open question
+   is whether a stronger `writer` model helps, but that adds model capability rather than
+   tool value. Not pursued for now.
+2. **Crew:** the mechanics work; the problem is cost per value. Generic options:
+   - **Smaller default reading:** a smaller background sweep (it reads about 150 records)
+     and fewer records per `ask`.
+   - **Budget-aware crew:** cap the readers' share of the budget (e.g. 25%) and show each
+     call's token cost to the agent.
+   - **A cheaper `reader` model:** a design decision, since it changes which models are
+     used.
+3. **Noise:** with 2 runs per arm, differences under about 0.06 combined aren't reliable;
+   the baseline's runs differ by 0.067. The crew-against-atlas gap (0.083) is borderline,
+   but its main cause, readers using half the budget, is clear from usage.

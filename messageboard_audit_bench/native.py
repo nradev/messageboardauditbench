@@ -33,7 +33,7 @@ from inspect_swe import claude_code, codex_cli
 
 from messageboard_audit_bench.audit import trajectory_metrics
 from messageboard_audit_bench.final_writer import LEVELS as WRITER_LEVELS
-from messageboard_audit_bench.final_writer import run_writer
+from messageboard_audit_bench.final_writer import run_writer, variant_name
 from messageboard_audit_bench.investigation_tools import atlas as atlas_tool
 from messageboard_audit_bench.investigation_tools import (
     auto_gapcheck,
@@ -56,7 +56,10 @@ from messageboard_audit_bench.report_length import (
     limits,
     measure,
 )
-from messageboard_audit_bench.token_budget import OutputTokenBudget
+from messageboard_audit_bench.token_budget import (
+    OutputTokenBudget,
+    sample_output_tokens,
+)
 
 REPORT_PATH = "/work/report.md"
 # The writer gets at least this long even when the agent used all of its time.
@@ -654,6 +657,7 @@ def inspect_native_agent(
     writer_tokens: int = 0,
     writer_seconds: int = 0,
     writer_strength: str = "edit",
+    writer_variants: Sequence[tuple[str, str]] = (),
 ) -> Solver:
     """Run an agent through Inspect and collect its on-disk report.
 
@@ -666,6 +670,12 @@ def inspect_native_agent(
     model call after the agent stops (``final_writer``), within ``writer_tokens`` more
     output tokens (token budgets) or ``writer_seconds`` more seconds (time budgets) than
     the agent's own budget; the draft is kept on any failure.
+
+    ``writer_variants`` ((level, strength) pairs, ReAct only) run the writer once per
+    variant on the final report after the agent stops, outside the agent's budget: each
+    variant gets ``writer_tokens`` output tokens (token budgets) and ``writer_seconds``
+    seconds of its own. report.md and the graded output stay the agent's report; each
+    variant's report is stored in ``writer_variants`` metadata for the variant scorers.
 
     ``seed_reports`` maps a sample's parent epoch (``metadata["parent_epoch"]``)
     to an earlier report placed at ``/work/report.md`` before the agent starts,
@@ -682,6 +692,8 @@ def inspect_native_agent(
         raise ValueError("sweep_at_start needs tools=atlas,crew")
     if writer is not None and (writer not in WRITER_LEVELS or agent != "react"):
         raise ValueError(f"writer needs agent=react and one of {', '.join(WRITER_LEVELS)}")
+    if writer_variants and (writer is not None or agent != "react"):
+        raise ValueError("writer_variants needs agent=react and replaces writer (the report stays the agent's)")
     if policy_aware_continue_enabled and agent != "react":
         raise ValueError("policy_aware_continue is only wired into agent=react")
     if investigation_tools and agent != "react":
@@ -797,6 +809,7 @@ def inspect_native_agent(
             },
         )
         agent_state = AgentState(messages=state.messages)
+        agent_budget_meta = None  # the agent's token usage, frozen before writer variants run
         limit_error = None
         terminal_refusal = False
         early_stop_resume_attempts = 0
@@ -916,6 +929,42 @@ def inspect_native_agent(
                 limit_error = correction_limit
                 terminal_refusal = _terminal_refusal(agent_state)
                 report, report_read_error = await _read_report()
+
+            if writer_variants and not terminal_refusal:
+                # Separate from the agent's budget: the agent's own usage is frozen here, and
+                # each variant has its own allowance.
+                if crew is not None and crew.background is not None and not crew.background.done():
+                    crew.background.cancel()
+                if "atlas" in investigation_tools:
+                    state.metadata["atlas_coverage"] = await read_atlas_coverage()
+                if token_budget is not None:
+                    agent_budget_meta = token_budget.metadata()
+                cache: dict = {}
+                variants: dict = {}
+                for level, strength in writer_variants:
+                    base = sample_output_tokens()
+                    result = await run_writer(
+                        level,
+                        state.input_text,
+                        report,
+                        min_words=report_min_words,
+                        max_words=report_max_words,
+                        tokens_left=(lambda base=base: max(0, writer_tokens - (sample_output_tokens() - base)))
+                        if token_budget is not None else None,
+                        deadline=time.monotonic() + writer_seconds,
+                        install="atlas" not in investigation_tools,
+                        strength=strength,
+                        cache=cache,
+                    )
+                    variants[variant_name(level, strength)] = {
+                        **result.meta,
+                        "replaced": result.report is not None,
+                        # A variant that kept the draft is graded on the draft.
+                        "report": result.report if result.report is not None else report,
+                    }
+                state.metadata["writer_variants"] = variants
+                state.metadata["writer_variant_allowance"] = {
+                    "tokens": writer_tokens if token_budget is not None else None, "seconds": writer_seconds}
 
             if writer is not None and not terminal_refusal:
                 # The writer works after the investigation: stop background reading, and
@@ -1060,7 +1109,7 @@ def inspect_native_agent(
                 stop_hook_fired=stop_hook_fired,
             )
             if token_budget is not None:
-                state.metadata.update(token_budget.metadata())
+                state.metadata.update(agent_budget_meta or token_budget.metadata())
             # Lazy import prevents the audit helper from creating a native
             # runtime import cycle. It reads the finalized trajectory only.
             try:

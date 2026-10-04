@@ -284,3 +284,107 @@ def test_repair_call_gets_the_rest_of_the_allowance(monkeypatch):
     model.generate = spend
     _run(tokens_left=lambda: left[0])
     assert [c.max_tokens for c in model.configs] == [12000, 9000]
+
+
+def test_parse_variants():
+    assert fw.parse_variants("W3:edit, W3:rewrite,W1") == (("W3", "edit"), ("W3", "rewrite"), ("W1", "edit"))
+    assert fw.parse_variants(["W2:rebalance"]) == (("W2", "rebalance"),)  # Inspect's CLI passes a list
+    assert fw.parse_variants(None) == ()
+    for bad in ("W4:edit", "W3:heavy", "W3,W3:edit"):
+        with pytest.raises(ValueError):
+            fw.parse_variants(bad)
+
+
+@pytest.mark.asyncio
+async def test_variant_scorer_grades_the_variant_report_and_leaves_the_state_alone():
+    from inspect_ai.model import ModelOutput
+    from inspect_ai.scorer import Score
+
+    seen = []
+
+    async def inner(state, target):
+        seen.append(state.output.completion)
+        return Score(value=len(state.output.completion))
+
+    state = SimpleNamespace(metadata={"writer_variants": {"W3-edit": {"report": "# Final", "replaced": True}}},
+                            output=ModelOutput.from_content(model="m", content="# Draft"))
+    sc = fw.variant_scorer(inner, "W3-edit", "v2_W3_edit_test")
+    res = await sc(state, None)
+    assert seen == ["# Final"] and res.value == 7 and res.metadata["writer_variant"] == "W3-edit"
+    assert state.output.completion == "# Draft"  # the sample's own output is untouched
+    missing = await fw.variant_scorer(inner, "W1-edit", "v2_W1_edit_test")(state, None)
+    assert missing.answer == "ungraded"
+
+
+def test_task_variants_keep_the_full_budget_and_add_scorers():
+    from inspect_ai._util.registry import registry_info
+
+    from messageboard_audit_bench.task import _german_wiki_report as g
+
+    t = g(agent="react", config="blind-tokens", token_budget=200000, tools="atlas",
+          writer_variants="W3:edit,W3:rewrite")
+    s = t.dataset[0]
+    assert "200,000 output tokens" in s.input and s.metadata["writer_variants"] == ["W3-edit", "W3-rewrite"]
+    names = [registry_info(x).name.split("/")[-1] for x in t.scorer]
+    assert names[:2] == ["sheet_scorer", "sheet_scorer"]  # the agent's own report, as before
+    assert {"v2_W3_edit", "tldrh_W3_edit", "v2_W3_rewrite", "tldrh_W3_rewrite"} <= set(names)
+    base = g(agent="react", config="blind-tokens", token_budget=200000, tools="atlas")
+    assert t.time_limit == base.time_limit + 2 * 10 * 60 + 3 * 60  # 2 variants x 10 min + setup
+    timed = g(agent="react", time_limit_minutes=30, writer_variants="W1").dataset[0]
+    assert "30 minutes" in timed.input
+    with pytest.raises(ValueError):
+        g(agent="react", time_limit_minutes=30, writer="W1", writer_variants="W3:edit")
+
+
+@pytest.mark.asyncio
+async def test_solver_runs_each_variant_outside_the_budget_and_keeps_the_report(monkeypatch):
+    from inspect_ai.agent import AgentState
+    from inspect_ai.model import ChatMessageAssistant
+
+    import messageboard_audit_bench.native as native
+    from tests.test_solver import _state
+
+    files = {native.REPORT_PATH: DRAFT}
+    calls = []
+    usage = [1000]
+
+    async def fake_report():
+        return files[native.REPORT_PATH], None
+
+    async def fake_run(*_a, **_k):
+        return AgentState(messages=[*_state().messages, ChatMessageAssistant(content="done")]), None
+
+    async def fake_writer(level, task_prompt, draft, **kw):
+        calls.append((level, kw["strength"], kw["tokens_left"](), id(kw["cache"])))
+        usage[0] += 5000  # the writer's tokens
+        if kw["strength"] == "rewrite":
+            return fw.WriterResult(None, {"status": "kept_draft"})
+        return fw.WriterResult(f"# {level} {kw['strength']}", {"status": "replaced"})
+
+    async def nothing(*_a, **_k):
+        return None
+
+    class FakeSandbox:
+        async def exec(self, *a, **k):
+            return SimpleNamespace(success=False, stdout="", stderr="")
+
+    monkeypatch.setattr(native, "inspect_agent", lambda *_a, **_k: object())
+    monkeypatch.setattr(native, "_prepare_budget", nothing)
+    monkeypatch.setattr(native, "run", fake_run)
+    monkeypatch.setattr(native, "_read_report", fake_report)
+    monkeypatch.setattr(native, "sandbox", lambda: FakeSandbox())
+    monkeypatch.setattr(native, "run_writer", fake_writer)
+    monkeypatch.setattr(native, "sample_output_tokens", lambda: usage[0])
+    monkeypatch.setattr("messageboard_audit_bench.token_budget.sample_output_tokens", lambda: usage[0])
+
+    solver = native.inspect_native_agent("react", 600, min_runtime_fraction=0, output_token_budget=2000,
+                                         writer_variants=(("W3", "edit"), ("W3", "rewrite")),
+                                         writer_tokens=20000, writer_seconds=600)
+    state = await solver(_state(), None)
+    assert [c[:3] for c in calls] == [("W3", "edit", 20000), ("W3", "rewrite", 20000)]  # each its own allowance
+    assert calls[0][3] == calls[1][3]  # one shared cache: atlas install and inputs prepared once
+    v = state.metadata["writer_variants"]
+    assert v["W3-edit"]["report"] == "# W3 edit" and v["W3-edit"]["replaced"] is True
+    assert v["W3-rewrite"]["report"] == DRAFT and v["W3-rewrite"]["replaced"] is False
+    assert state.output.completion == DRAFT and files[native.REPORT_PATH] == DRAFT  # the agent's report
+    assert state.metadata["budget_tokens_used"] == 0  # the agent's usage, without the 10k of the writers
